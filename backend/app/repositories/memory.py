@@ -234,3 +234,219 @@ class InMemoryReviewSessionRepository:
         if r.status is not ReviewStatus.PENDING:
             self._latest_pending.pop((r.channel, r.recipient), None)
         return r
+
+
+# ── Campaigns / Experiments / Approval / Recycle / Privacy ────────────────
+from app.domain.entities.campaign import Campaign, CampaignStatus
+from app.domain.entities.experiment import Experiment, ExperimentStatus
+from app.domain.entities.approval_policy import (
+    ApprovalPolicy,
+    ApprovalRequest,
+    ApprovalRequestStatus,
+)
+from app.domain.entities.recycle_policy import RecyclePolicy
+from app.domain.entities.data_export import DataExportJob, DataJobStatus
+from app.domain.value_objects.ids import (
+    ApprovalPolicyId,
+    ApprovalRequestId,
+    CampaignId,
+    DataExportJobId,
+    ExperimentId,
+    RecyclePolicyId,
+)
+
+
+class InMemoryCampaignRepository:
+    def __init__(self) -> None:
+        self._s = _ScopedStore()
+        self._global: dict[CampaignId, Campaign] = {}
+
+    async def add(self, c: Campaign) -> Campaign:
+        self._s.for_org(c.org_id)[c.id] = c
+        self._global[c.id] = c
+        return c
+
+    async def get(self, org_id: OrgId, campaign_id: CampaignId) -> Campaign | None:
+        return self._s.for_org(org_id).get(campaign_id)
+
+    async def list(self, org_id: OrgId, *, status: str | None = None) -> list[Campaign]:
+        items = list(self._s.for_org(org_id).values())
+        if status:
+            items = [c for c in items if c.status.value == status]
+        return items
+
+    async def list_due(self, now) -> list[Campaign]:
+        out: list[Campaign] = []
+        active = {CampaignStatus.SCHEDULED, CampaignStatus.RUNNING}
+        for c in self._global.values():
+            if c.status not in active:
+                continue
+            if c.due_steps(now):
+                out.append(c)
+        return out
+
+    async def update(self, c: Campaign) -> Campaign:
+        self._s.for_org(c.org_id)[c.id] = c
+        self._global[c.id] = c
+        return c
+
+    async def delete(self, org_id: OrgId, campaign_id: CampaignId) -> None:
+        self._s.for_org(org_id).pop(campaign_id, None)
+        self._global.pop(campaign_id, None)
+
+
+class InMemoryExperimentRepository:
+    def __init__(self) -> None:
+        self._s = _ScopedStore()
+        self._global: dict[ExperimentId, Experiment] = {}
+
+    async def add(self, e: Experiment) -> Experiment:
+        self._s.for_org(e.org_id)[e.id] = e
+        self._global[e.id] = e
+        return e
+
+    async def get(self, org_id: OrgId, experiment_id: ExperimentId) -> Experiment | None:
+        return self._s.for_org(org_id).get(experiment_id)
+
+    async def list(
+        self, org_id: OrgId, *, status: str | None = None,
+    ) -> list[Experiment]:
+        items = list(self._s.for_org(org_id).values())
+        if status:
+            items = [e for e in items if e.status.value == status]
+        return items
+
+    async def list_running(self) -> list[Experiment]:
+        return [
+            e for e in self._global.values()
+            if e.status is ExperimentStatus.RUNNING
+        ]
+
+    async def update(self, e: Experiment) -> Experiment:
+        self._s.for_org(e.org_id)[e.id] = e
+        self._global[e.id] = e
+        return e
+
+    async def delete(self, org_id: OrgId, experiment_id: ExperimentId) -> None:
+        self._s.for_org(org_id).pop(experiment_id, None)
+        self._global.pop(experiment_id, None)
+
+
+class InMemoryApprovalPolicyRepository:
+    def __init__(self) -> None:
+        self._s = _ScopedStore()
+
+    async def add(self, p: ApprovalPolicy) -> ApprovalPolicy:
+        self._s.for_org(p.org_id)[p.id] = p
+        return p
+
+    async def get(
+        self, org_id: OrgId, policy_id: ApprovalPolicyId,
+    ) -> ApprovalPolicy | None:
+        return self._s.for_org(org_id).get(policy_id)
+
+    async def list(self, org_id: OrgId) -> list[ApprovalPolicy]:
+        return list(self._s.for_org(org_id).values())
+
+    async def update(self, p: ApprovalPolicy) -> ApprovalPolicy:
+        self._s.for_org(p.org_id)[p.id] = p
+        return p
+
+    async def delete(self, org_id: OrgId, policy_id: ApprovalPolicyId) -> None:
+        self._s.for_org(org_id).pop(policy_id, None)
+
+
+class InMemoryApprovalRequestRepository:
+    def __init__(self) -> None:
+        self._s = _ScopedStore()
+
+    async def add(self, r: ApprovalRequest) -> ApprovalRequest:
+        self._s.for_org(r.org_id)[r.id] = r
+        return r
+
+    async def get(
+        self, org_id: OrgId, request_id: ApprovalRequestId,
+    ) -> ApprovalRequest | None:
+        return self._s.for_org(org_id).get(request_id)
+
+    async def list_open(self, org_id: OrgId) -> list[ApprovalRequest]:
+        return [
+            r for r in self._s.for_org(org_id).values()
+            if r.status in (
+                ApprovalRequestStatus.PENDING,
+                ApprovalRequestStatus.IN_PROGRESS,
+            )
+        ]
+
+    async def list_for_post(
+        self, org_id: OrgId, post_id: PostId,
+    ) -> list[ApprovalRequest]:
+        return [
+            r for r in self._s.for_org(org_id).values()
+            if r.post_id == post_id
+        ]
+
+    async def update(self, r: ApprovalRequest) -> ApprovalRequest:
+        self._s.for_org(r.org_id)[r.id] = r
+        return r
+
+
+class InMemoryRecyclePolicyRepository:
+    def __init__(self) -> None:
+        self._s = _ScopedStore()
+        self._global: dict[RecyclePolicyId, RecyclePolicy] = {}
+
+    async def add(self, p: RecyclePolicy) -> RecyclePolicy:
+        self._s.for_org(p.org_id)[p.id] = p
+        self._global[p.id] = p
+        return p
+
+    async def get(
+        self, org_id: OrgId, policy_id: RecyclePolicyId,
+    ) -> RecyclePolicy | None:
+        return self._s.for_org(org_id).get(policy_id)
+
+    async def list(self, org_id: OrgId) -> list[RecyclePolicy]:
+        return list(self._s.for_org(org_id).values())
+
+    async def list_due(self, now) -> list[RecyclePolicy]:
+        return [p for p in self._global.values() if p.is_due(now)]
+
+    async def update(self, p: RecyclePolicy) -> RecyclePolicy:
+        self._s.for_org(p.org_id)[p.id] = p
+        self._global[p.id] = p
+        return p
+
+    async def delete(self, org_id: OrgId, policy_id: RecyclePolicyId) -> None:
+        self._s.for_org(org_id).pop(policy_id, None)
+        self._global.pop(policy_id, None)
+
+
+class InMemoryDataExportJobRepository:
+    def __init__(self) -> None:
+        self._s = _ScopedStore()
+        self._global: dict[DataExportJobId, DataExportJob] = {}
+
+    async def add(self, j: DataExportJob) -> DataExportJob:
+        self._s.for_org(j.org_id)[j.id] = j
+        self._global[j.id] = j
+        return j
+
+    async def get(
+        self, org_id: OrgId, job_id: DataExportJobId,
+    ) -> DataExportJob | None:
+        return self._s.for_org(org_id).get(job_id)
+
+    async def list(self, org_id: OrgId) -> list[DataExportJob]:
+        return list(self._s.for_org(org_id).values())
+
+    async def list_pending(self) -> list[DataExportJob]:
+        return [
+            j for j in self._global.values()
+            if j.status in (DataJobStatus.PENDING, DataJobStatus.RUNNING)
+        ]
+
+    async def update(self, j: DataExportJob) -> DataExportJob:
+        self._s.for_org(j.org_id)[j.id] = j
+        self._global[j.id] = j
+        return j

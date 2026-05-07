@@ -17,6 +17,7 @@ import { Sidebar } from '@/components/layout/Sidebar';
 import { TopBar } from '@/components/layout/TopBar';
 import { useApi, api, ApiError } from '@/lib/api/client';
 import { ApiErrorBanner } from '@/components/ui/ApiErrorBanner';
+import { PlatformIcon } from '@/components/ui/PlatformIcon';
 import type { PluginInfo, Platform, PlatformGroup } from '@/lib/api/types';
 import {
   Plug, Plus, Star, X, AlertTriangle, Send, CheckCircle2, XCircle,
@@ -112,7 +113,11 @@ export default function PlatformsPage() {
                 {(groups ?? []).map(g => (
                   <Card key={g.plugin_name}>
                     <div className="flex items-center justify-between mb-3">
-                      <div>
+                      <div className="flex items-start gap-3 min-w-0">
+                        <div className="size-9 rounded-lg bg-ink-50 flex items-center justify-center shrink-0">
+                          <PlatformIcon name={g.plugin_name} size={20} />
+                        </div>
+                        <div className="min-w-0">
                         <CardTitle>
                           {g.display_name}
                           {Boolean(((plugins ?? []).find(p => p.name === g.plugin_name)?.capabilities as any)?.experimental) && (
@@ -122,6 +127,7 @@ export default function PlatformsPage() {
                         <CardDescription>
                           {g.accounts.length} account{g.accounts.length !== 1 && 's'}
                         </CardDescription>
+                        </div>
                       </div>
                       <Button
                         size="sm"
@@ -156,8 +162,11 @@ export default function PlatformsPage() {
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {(plugins ?? []).map(p => (
                 <Card key={p.name}>
-                  <div className="flex items-start justify-between">
-                    <div>
+                  <div className="flex items-start gap-3">
+                    <div className="size-10 rounded-lg bg-ink-50 flex items-center justify-center shrink-0">
+                      <PlatformIcon name={p.name} size={22} />
+                    </div>
+                    <div className="min-w-0 flex-1">
                       <CardTitle>
                         {p.display_name}
                         {(p.capabilities as any)?.experimental && (

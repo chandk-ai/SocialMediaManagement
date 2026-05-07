@@ -63,6 +63,11 @@ function Wizard() {
   const { data: sources }   = useApi<Source[]>('/sources');
   const { data: groups }    = useApi<PlatformGroup[]>('/platforms/grouped');
   const { data: llms }      = useApi<PluginInfo[]>('/plugins?kind=llm');
+  const { data: llmKeys }   = useApi<{
+    preferred_provider: string | null;
+    preferred_model: string | null;
+    providers: Array<{ provider: string; is_set: boolean }>;
+  }>('/llm-keys');
 
   const [step, setStep] = useState<StepKey>(initialTemplate ? 'sources' : 'template');
   const [template, setTemplate] = useState<WorkflowTemplate | null>(
@@ -101,6 +106,13 @@ function Wizard() {
     setIntervalMinutes(d.schedule.interval_minutes != null ? String(d.schedule.interval_minutes) : '');
     setTimezone(d.schedule.timezone);
   }, [template]);
+
+  // Default the LLM provider to the org's preferred one (set in Settings).
+  useEffect(() => {
+    if (llmKeys?.preferred_provider) {
+      setLlm(llmKeys.preferred_provider);
+    }
+  }, [llmKeys?.preferred_provider]);
 
   function toggle(arr: string[], setArr: (v: string[]) => void, id: string) {
     setArr(arr.includes(id) ? arr.filter(x => x !== id) : [...arr, id]);

@@ -137,7 +137,33 @@ def get_workflow_service() -> WorkflowService:
         post_repo=repos["post"],
         registry=get_registry(),
         review_repo=repos["review"],
+        llm_credentials=_get_llm_credentials_service(),
     )
+
+
+@lru_cache
+def _get_llm_credentials_service():
+    """Lazy-init the LLM credentials service backed by the same DB engine
+    as the rest of the repos. Returns None on the in-memory backend."""
+    settings = get_settings()
+    if settings.resolved_persistence_backend() != "supabase":
+        return None
+    try:
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from app.services.llm_credentials import LlmCredentialsService
+        engine = create_async_engine(
+            settings.db_url(),
+            pool_pre_ping=True,
+            connect_args=settings.db_connect_args(),
+        )
+        sm = async_sessionmaker(engine, expire_on_commit=False)
+        return LlmCredentialsService(sm)
+    except Exception:                                            # noqa: BLE001
+        return None
+
+
+def get_llm_credentials_service():
+    return _get_llm_credentials_service()
 
 
 async def build_dev_workflow_service() -> WorkflowService:

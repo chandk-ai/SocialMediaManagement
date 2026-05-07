@@ -2,7 +2,7 @@ from fastapi import APIRouter
 
 from . import (
     auth, platforms, sources, workflows, posts, plugins, health,
-    triggers, reviews, webhooks,
+    triggers, reviews, webhooks, llm_keys,
 )
 
 api_router = APIRouter()
@@ -16,3 +16,4 @@ api_router.include_router(plugins.router, prefix="/plugins", tags=["plugins"])
 api_router.include_router(triggers.router, prefix="/triggers", tags=["triggers"])
 api_router.include_router(reviews.router, prefix="/reviews", tags=["reviews"])
 api_router.include_router(webhooks.router, prefix="/webhooks", tags=["webhooks"])
+api_router.include_router(llm_keys.router, tags=["llm"])

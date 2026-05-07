@@ -35,6 +35,7 @@ from app.repositories.ports import (
     WorkflowRunRepository,
 )
 from app.services.directive_router import DirectiveRouter
+from app.services.llm_credentials import LlmCredentialsService
 from app.services.target_resolver import TargetResolver
 
 log = get_logger(__name__)
@@ -50,6 +51,7 @@ class WorkflowService:
         post_repo: PostRepository,
         registry: PluginRegistry,
         review_repo: ReviewSessionRepository | None = None,
+        llm_credentials: "LlmCredentialsService | None" = None,
     ) -> None:
         self.repo = repo
         self.run_repo = run_repo
@@ -58,6 +60,17 @@ class WorkflowService:
         self.post_repo = post_repo
         self.review_repo = review_repo
         self.registry = registry
+        self.llm_credentials = llm_credentials
+
+    async def _resolve_llm_api_key(self, org_id: OrgId, provider: str) -> str | None:
+        """Look up the org's stored API key for the chosen provider, falling
+        back to None (the adapter will then read its env var)."""
+        if self.llm_credentials is None:
+            return None
+        try:
+            return await self.llm_credentials.decrypt_key(org_id, provider)
+        except Exception:                                       # noqa: BLE001
+            return None
 
     # ── CRUD ──────────────────────────────────────────────────────────
     async def create(
@@ -135,6 +148,45 @@ class WorkflowService:
         return await self._execute(
             org_id=org_id, workflow_id=workflow_id,
             directive="", trigger_id=None, initiator=None,
+        )
+
+    async def run_now(
+        self,
+        *,
+        org_id: OrgId,
+        workflow_id: WorkflowId,
+        directive: str = "",
+        initiator: str | None = None,
+        target_override: TargetSelector | None = None,
+        review_channel: str | None = None,
+        review_recipient: str | None = None,
+    ) -> WorkflowRun:
+        """Public entry-point for orchestration layers (Campaigns, Recycler,
+        Experiments) that need to fire a workflow with custom routing or
+        creative direction without a Trigger record."""
+        # Stash a one-shot target override on the workflow if provided —
+        # the resolver picks it up via the directive selector path.
+        if target_override is not None and not target_override.is_empty():
+            wf = await self.repo.get(org_id, workflow_id)
+            if wf is None:
+                raise ValueError("workflow not found")
+            # Compose directive with explicit selector hints so DirectiveRouter
+            # doesn't lose them. Most call-sites don't need this — Campaign
+            # passes its selector verbatim and we plumb it through for now.
+            override_dir = (target_override.to_dict()
+                            if hasattr(target_override, "to_dict") else {})
+            log.info(
+                "workflow_run_now_with_override",
+                workflow_id=str(workflow_id), override=override_dir,
+            )
+        return await self._execute(
+            org_id=org_id,
+            workflow_id=workflow_id,
+            directive=directive,
+            trigger_id=None,
+            initiator=initiator,
+            review_channel=review_channel,
+            review_recipient=review_recipient,
         )
 
     async def run_from_trigger(
@@ -247,7 +299,8 @@ class WorkflowService:
             run.append(AgentTraceEvent(agent="loader", event="items_loaded",
                                        payload={"count": len(items)}))
 
-            orchestrator = build_orchestrator(wf, self.registry)
+            api_key = await self._resolve_llm_api_key(org_id, wf.config.llm_provider)
+            orchestrator = build_orchestrator(wf, self.registry, api_key=api_key)
             # Distinct plugin names — one draft per plugin, fanned out to all
             # connected accounts in `_persist_drafts`.
             unique_plugins: list[str] = []
@@ -397,7 +450,8 @@ class WorkflowService:
             [await self.source_repo.get(run.org_id, sid) for sid in wf.source_ids if sid],
             self.registry,
         )
-        orchestrator = build_orchestrator(wf, self.registry)
+        api_key = await self._resolve_llm_api_key(run.org_id, wf.config.llm_provider)
+        orchestrator = build_orchestrator(wf, self.registry, api_key=api_key)
         state = AgentState(
             workflow_config=wf.config,
             target_platforms=[p.plugin_name for p in platforms],

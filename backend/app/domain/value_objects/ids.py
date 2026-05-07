@@ -17,6 +17,16 @@ PostId = NewType("PostId", UUID)
 RunId = NewType("RunId", UUID)
 TriggerId = NewType("TriggerId", UUID)
 ReviewId = NewType("ReviewId", UUID)
+CampaignId = NewType("CampaignId", UUID)
+CampaignStepId = NewType("CampaignStepId", UUID)
+ExperimentId = NewType("ExperimentId", UUID)
+VariantId = NewType("VariantId", UUID)
+ApprovalPolicyId = NewType("ApprovalPolicyId", UUID)
+ApprovalStepId = NewType("ApprovalStepId", UUID)
+ApprovalRequestId = NewType("ApprovalRequestId", UUID)
+LocaleVariantId = NewType("LocaleVariantId", UUID)
+RecyclePolicyId = NewType("RecyclePolicyId", UUID)
+DataExportJobId = NewType("DataExportJobId", UUID)
 
 
 def new_id() -> UUID:
