@@ -88,7 +88,7 @@ export default function CalendarPage() {
                 ))}
               </select>
               <Button
-                variant={showAiSlots ? 'default' : 'outline'}
+                variant={showAiSlots ? 'primary' : 'outline'}
                 size="sm"
                 onClick={() => setShowAiSlots(s => !s)}
                 title="Highlight optimal slots based on your past publishing"
