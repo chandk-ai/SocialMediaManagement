@@ -36,18 +36,24 @@ def configure_logging(level: str = "INFO", json: bool = True) -> None:
         else structlog.dev.ConsoleRenderer(colors=True)
     )
 
+    # Pipe stdlib logging through stdout (uvicorn / celery use stdlib).
+    logging.basicConfig(
+        level=level.upper(),
+        format="%(message)s",
+        handlers=[logging.StreamHandler(sys.stdout)],
+    )
+
+    # Integrate with stdlib so `add_logger_name` has a real Logger to read
+    # from. PrintLoggerFactory has no `.name` and crashes that processor.
     structlog.configure(
         processors=[*shared, renderer],
         wrapper_class=structlog.make_filtering_bound_logger(
             getattr(logging, level.upper(), logging.INFO)
         ),
         context_class=dict,
-        logger_factory=structlog.PrintLoggerFactory(file=sys.stdout),
+        logger_factory=structlog.stdlib.LoggerFactory(),
         cache_logger_on_first_use=True,
     )
-
-    # Pipe stdlib logging through structlog
-    logging.basicConfig(level=level.upper(), handlers=[logging.StreamHandler(sys.stdout)])
 
 
 def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:
