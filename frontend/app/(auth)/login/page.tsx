@@ -2,10 +2,11 @@
 /**
  * Email + password login via Supabase Auth.
  *
- * If you also enable Okta in env (NEXT_PUBLIC_OKTA_ENABLED=true), a
- * "Continue with SSO" button is shown alongside the email form.
+ * The form uses `useSearchParams` (to honour `?callbackUrl=…`), which Next 14
+ * requires inside a Suspense boundary when the page is statically prerendered.
+ * The outer `LoginPage` is the boundary; `LoginForm` is the client island.
  */
-import { useState } from 'react';
+import { Suspense, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
@@ -13,7 +14,30 @@ import { useToast } from '@/components/ui/Toast';
 import { getSupabase } from '@/lib/auth/supabase';
 import { signIn } from 'next-auth/react';
 
+export const dynamic = 'force-dynamic';
+
 export default function LoginPage() {
+  return (
+    <Suspense fallback={<LoginShell />}>
+      <LoginForm />
+    </Suspense>
+  );
+}
+
+function LoginShell({ children }: { children?: React.ReactNode }) {
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-ink-50 p-4">
+      <div className="card w-full max-w-md p-8 text-center">
+        <div className="mx-auto size-10 rounded-xl bg-accent mb-4" />
+        <h1 className="text-xl font-semibold tracking-tight">Sign in to SMMS</h1>
+        <p className="text-sm text-ink-500 mt-1">Use your work email + password.</p>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function LoginForm() {
   const router = useRouter();
   const params = useSearchParams();
   const callbackUrl = params.get('callbackUrl') || '/dashboard';
