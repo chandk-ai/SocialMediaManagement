@@ -1,0 +1,34 @@
+# gitleaks config — extends the default ruleset with allowlists for values
+# that look like secrets but aren't.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "False-positives for our stack"
+
+# 1. Files that *should* contain placeholder secrets:
+paths = [
+  '''(?i)\.env\.example$''',
+  '''(?i)\.env\..*\.example$''',
+  '''(?i)\.env\.local\.example$''',
+  '''(?i)\.env\.production\.local\.example$''',
+  '''docs/.*\.md$''',                   # docs reference connection-string formats
+  '''infra/.*\.md$''',
+]
+
+# 2. Patterns that look like secrets but are *intentionally* public:
+regexes = [
+  # Supabase publishable keys — designed to ship to the browser
+  '''sb_publishable_[A-Za-z0-9_-]{20,}''',
+  # Supabase anon (legacy) JWT — by design exposed via NEXT_PUBLIC_*
+  '''eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]*"role":"anon"[A-Za-z0-9_."-]+''',
+  # Vercel project IDs (prj_…) — public identifiers, not secrets
+  '''prj_[A-Za-z0-9]{20,}''',
+  # Render service IDs (srv-…) — public identifiers
+  '''srv-[a-z0-9]{20,}''',
+  # Supabase project refs (in URLs) — public identifiers
+  '''[a-z]{20}\.supabase\.co''',
+]
+
+# 3. Specific commits to ignore (use sparingly; prefer fixing forward)
+commits = []
