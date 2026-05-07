@@ -9,9 +9,11 @@ import { TopBar } from '@/components/layout/TopBar';
 import { useApi, api } from '@/lib/api/client';
 import { ApiErrorBanner } from '@/components/ui/ApiErrorBanner';
 import type { PluginInfo, Platform, PlatformGroup } from '@/lib/api/types';
-import { Plug, Plus, Star, X } from 'lucide-react';
+import { Plug, Plus, Star, X, AlertTriangle } from 'lucide-react';
 import { useState } from 'react';
 import { mutate } from 'swr';
+
+type Created = { id: string };
 
 export default function PlatformsPage() {
   const { data: plugins, error: pluginsErr, mutate: retryPlugins } =
@@ -21,17 +23,46 @@ export default function PlatformsPage() {
   const [adding, setAdding] = useState<PluginInfo | null>(null);
   const [label, setLabel] = useState('');
   const [handle, setHandle] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [warning, setWarning] = useState<string | null>(null);
 
   async function add() {
     if (!adding) return;
-    await api.post('/platforms', {
-      plugin_name: adding.name,
-      display_name: label || `${adding.display_name} account`,
-      account_handle: handle || null,
-      config: {},
-    });
-    setAdding(null); setLabel(''); setHandle('');
-    await mutate('/platforms/grouped');
+    setBusy(true); setWarning(null);
+    try {
+      const created = await api.post<Created>('/platforms', {
+        plugin_name: adding.name,
+        display_name: label || `${adding.display_name} account`,
+        account_handle: handle || null,
+        config: {},
+      });
+      // Trigger provider OAuth. The redirect_uri is a frontend route that
+      // re-relays code+state to the backend (preserves bearer auth).
+      const redirectUri = `${window.location.origin}/oauth/callback?platform_id=${created.id}`;
+      try {
+        const { authorize_url } = await api.post<{ authorize_url: string }>(
+          `/platforms/${created.id}/oauth/start?redirect_uri=${encodeURIComponent(redirectUri)}`,
+          {},
+        );
+        sessionStorage.setItem('oauth_platform_id', created.id);
+        window.location.href = authorize_url;
+        return;
+      } catch (e: any) {
+        const detail = e?.detail || e?.message || '';
+        if (/no OAuth provider/i.test(detail)) {
+          setWarning(
+            `${adding.display_name} doesn't use OAuth. ` +
+            `The account was saved — configure credentials manually if the provider needs them.`,
+          );
+        } else {
+          setWarning(`OAuth couldn't start: ${detail || 'unknown error'}.`);
+        }
+      }
+      await mutate('/platforms/grouped');
+      setAdding(null); setLabel(''); setHandle('');
+    } finally {
+      setBusy(false);
+    }
   }
 
   const connectedPlugins = new Set((groups ?? []).map(g => g.plugin_name));
@@ -156,9 +187,19 @@ export default function PlatformsPage() {
                   />
                 </div>
               </div>
+              {warning && (
+                <div className="mt-3 flex items-start gap-2 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2">
+                  <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+                  <span>{warning}</span>
+                </div>
+              )}
               <div className="mt-5 flex justify-end gap-2">
-                <Button variant="ghost" onClick={() => setAdding(null)}>Cancel</Button>
-                <Button onClick={add}>Create + start OAuth</Button>
+                <Button variant="ghost" onClick={() => { setAdding(null); setWarning(null); }} disabled={busy}>
+                  Cancel
+                </Button>
+                <Button onClick={add} disabled={busy}>
+                  {busy ? 'Starting…' : 'Create + start OAuth'}
+                </Button>
               </div>
             </Card>
           </div>
@@ -166,6 +207,16 @@ export default function PlatformsPage() {
       </div>
     </div>
   );
+}
+
+async function startReconnect(platformId: string) {
+  const redirectUri = `${window.location.origin}/oauth/callback?platform_id=${platformId}`;
+  const { authorize_url } = await api.post<{ authorize_url: string }>(
+    `/platforms/${platformId}/oauth/start?redirect_uri=${encodeURIComponent(redirectUri)}`,
+    {},
+  );
+  sessionStorage.setItem('oauth_platform_id', platformId);
+  window.location.href = authorize_url;
 }
 
 function AccountTile({ account }: { account: Platform }) {
@@ -186,7 +237,9 @@ function AccountTile({ account }: { account: Platform }) {
         </Badge>
       </div>
       <div className="flex gap-1.5">
-        <Button size="sm" variant="outline">Reconnect</Button>
+        <Button size="sm" variant="outline" onClick={() => startReconnect(account.id).catch(console.error)}>
+          {account.status === 'connected' ? 'Reconnect' : 'Connect'}
+        </Button>
         <Button size="sm" variant="ghost">Settings</Button>
       </div>
     </div>
