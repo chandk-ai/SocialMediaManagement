@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from functools import lru_cache
 from typing import Any, Literal
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from pydantic import AnyUrl, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -22,9 +22,37 @@ def _supabase_project_ref(url: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _encode_password_in_url(url: str) -> str:
+    """Detect and URL-encode a literal password that contains unescaped ``@``,
+    ``:``, ``/``, etc. so that urlsplit / asyncpg parse the host correctly.
+
+    A correct URL has exactly one ``@`` (the credentials/host separator). If
+    the URL contains 2+ ``@`` signs, the extras live inside the password and
+    must be percent-encoded; otherwise the parser treats the LAST ``@`` as the
+    separator and the host ends up containing password text → ``gaierror``.
+
+    No-op when the URL already has 0 or 1 ``@``, or when the URL is empty.
+    """
+    if not url or url.count("@") <= 1:
+        return url
+    if "://" not in url:
+        return url
+    scheme, _, rest = url.partition("://")
+    creds, sep, host_part = rest.rpartition("@")
+    if not sep or ":" not in creds:
+        return url
+    user, _, password = creds.partition(":")
+    # Encode every reserved char that breaks URL parsing.
+    encoded = quote(password, safe="")
+    return f"{scheme}://{user}:{encoded}@{host_part}"
+
+
 def _normalize_supabase_db_url(url: str, project_ref: str | None) -> str:
     """Make a Supabase Postgres URL safe for asyncpg + Supavisor.
 
+    * Auto-encodes passwords that contain literal ``@`` / ``:`` / ``/`` (a
+      common copy-paste pitfall — extra ``@`` signs would otherwise be parsed
+      as part of the host, producing ``gaierror: Name or service not known``).
     * Always uses the async driver: rewrites bare ``postgresql://`` and
       ``postgres://`` to ``postgresql+asyncpg://`` so SQLAlchemy doesn't try to
       load psycopg2 (which we don't ship).
@@ -35,6 +63,9 @@ def _normalize_supabase_db_url(url: str, project_ref: str | None) -> str:
     """
     if not url:
         return url
+
+    # 0. Auto-encode passwords with stray @ / : / etc.
+    url = _encode_password_in_url(url)
 
     # 1. Force the async driver so we never accidentally hit psycopg2.
     if url.startswith("postgresql://"):
