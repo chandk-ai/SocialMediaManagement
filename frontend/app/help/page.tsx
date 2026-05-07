@@ -31,12 +31,13 @@ import {
   Sparkles, Plug, Database, Workflow, MessageSquare, Brain, Calendar,
   BarChart3, Zap, AlertCircle, HelpCircle, BookOpen, Search, ChevronRight,
   CheckCircle2, ExternalLink, Info,
+  type LucideIcon,
 } from 'lucide-react';
 
 type Topic = {
   id: string;
   title: string;
-  icon: React.ComponentType<{ size?: number; className?: string }>;
+  icon: LucideIcon;
   group: 'start' | 'using' | 'help';
 };
 
