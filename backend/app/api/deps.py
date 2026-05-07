@@ -73,6 +73,7 @@ def _build_repos(settings: Settings | None = None) -> dict:
             pool_size=settings.db.pool_size,
             max_overflow=settings.db.max_overflow,
             echo=settings.db.echo,
+            connect_args=settings.db_connect_args(),
         )
         sm = async_sessionmaker(engine, expire_on_commit=False)
         return {

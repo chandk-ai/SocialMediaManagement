@@ -87,6 +87,7 @@ class TenantAwareSessionFactory:
                         pool_size=s.db.pool_size,
                         max_overflow=s.db.max_overflow,
                         echo=s.db.echo,
+                        connect_args=s.db_connect_args(),
                     )
                     self._shared = async_sessionmaker(engine, expire_on_commit=False)
                     log.info("tenant_shared_engine_built", url=_redact(s.db_url()))
@@ -94,11 +95,13 @@ class TenantAwareSessionFactory:
 
             # Dedicated — one engine per tenant, cached.
             if ctx.org_id not in self._per_tenant:
+                from app.core.config import supabase_asyncpg_connect_args
                 engine = create_async_engine(
                     ctx.db_url,
                     pool_pre_ping=True,
                     pool_size=5,
                     max_overflow=10,
+                    connect_args=supabase_asyncpg_connect_args(ctx.db_url),
                 )
                 self._per_tenant[ctx.org_id] = async_sessionmaker(
                     engine, expire_on_commit=False,

@@ -6,11 +6,59 @@ SecretProvider (AWS Secrets Manager / HashiCorp Vault).
 """
 from __future__ import annotations
 
+import re
 from functools import lru_cache
-from typing import Literal
+from typing import Any, Literal
+from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import AnyUrl, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+# ── Supabase pooler helpers ──────────────────────────────────────────────────
+def _supabase_project_ref(url: str) -> str | None:
+    """Extract `<ref>` from `https://<ref>.supabase.co`."""
+    m = re.match(r"^https?://([a-z0-9]+)\.supabase\.co", (url or "").strip(), re.I)
+    return m.group(1) if m else None
+
+
+def _normalize_supabase_db_url(url: str, project_ref: str | None) -> str:
+    """Make a Supabase Postgres URL safe for asyncpg + Supavisor.
+
+    * Pooler hosts (``*.pooler.supabase.com``) require a tenant-scoped username
+      ``postgres.<project_ref>`` — bare ``postgres`` produces
+      ``InternalServerError: Tenant or user not found``.
+    * No-op if the URL already includes the project-ref or isn't a pooler URL.
+    """
+    if not url:
+        return url
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url
+    if "pooler.supabase.com" not in (parts.hostname or ""):
+        return url
+    if not parts.username or parts.username != "postgres":
+        return url  # already qualified or unexpected username
+    if not project_ref:
+        return url
+    user = f"postgres.{project_ref}"
+    pwd = parts.password
+    auth = f"{user}:{pwd}" if pwd is not None else user
+    host = parts.hostname or ""
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    netloc = f"{auth}@{host}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+
+def supabase_asyncpg_connect_args(url: str) -> dict[str, Any]:
+    """asyncpg connect_args required when talking through Supabase's
+    transaction-mode pooler (Supavisor / pgbouncer). Disables the
+    prepared-statement cache that breaks under tx pooling."""
+    if "pooler.supabase.com" in (url or ""):
+        return {"statement_cache_size": 0, "prepared_statement_cache_size": 0}
+    return {}
 
 
 class DatabaseSettings(BaseSettings):
@@ -130,10 +178,21 @@ class Settings(BaseSettings):
         return "dev"
 
     def db_url(self) -> str:
-        """Postgres URL the repositories connect to."""
+        """Postgres URL the repositories connect to.
+
+        Auto-normalizes Supabase pooler URLs so a bare `postgres` username gets
+        the required `postgres.<project-ref>` suffix.
+        """
         if self.resolved_persistence_backend() == "supabase" and self.supabase.postgres_connection_string:
-            return self.supabase.postgres_connection_string
+            return _normalize_supabase_db_url(
+                self.supabase.postgres_connection_string,
+                _supabase_project_ref(self.supabase.url),
+            )
         return self.db.url
+
+    def db_connect_args(self) -> dict[str, Any]:
+        """Extra asyncpg connect_args (e.g. statement cache disabled for pooler)."""
+        return supabase_asyncpg_connect_args(self.db_url())
 
 
 @lru_cache
