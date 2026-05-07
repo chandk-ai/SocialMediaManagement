@@ -1,10 +1,12 @@
 /**
- * Supabase server-side client + a small "current session" helper.
+ * Supabase server-side client + middleware variant.
  * Used by middleware (route guards) and the API proxy route (token forwarding).
  */
-import { createServerClient } from '@supabase/ssr';
+import { createServerClient, type CookieOptions } from '@supabase/ssr';
 import type { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
+
+type CookieToSet = { name: string; value: string; options?: CookieOptions };
 
 export function getServerSupabase() {
   const url  = process.env.NEXT_PUBLIC_SUPABASE_URL!;
@@ -13,8 +15,16 @@ export function getServerSupabase() {
   return createServerClient(url, anon, {
     cookies: {
       getAll: () => cookieStore.getAll(),
-      setAll: (xs) => xs.forEach(({ name, value, options }) =>
-        cookieStore.set({ name, value, ...options })),
+      setAll: (xs: CookieToSet[]) => {
+        try {
+          xs.forEach(({ name, value, options }) =>
+            cookieStore.set({ name, value, ...(options ?? {}) }),
+          );
+        } catch {
+          // `cookies().set()` only works inside Server Actions / Route
+          // Handlers; in plain RSC reads we silently no-op.
+        }
+      },
     },
   });
 }
@@ -27,10 +37,12 @@ export function getMiddlewareSupabase(req: NextRequest, res: NextResponse) {
   return createServerClient(url, anon, {
     cookies: {
       getAll: () => req.cookies.getAll(),
-      setAll: (xs) => xs.forEach(({ name, value, options }) => {
-        req.cookies.set({ name, value, ...options });
-        res.cookies.set({ name, value, ...options });
-      }),
+      setAll: (xs: CookieToSet[]) => {
+        xs.forEach(({ name, value, options }) => {
+          req.cookies.set({ name, value, ...(options ?? {}) });
+          res.cookies.set({ name, value, ...(options ?? {}) });
+        });
+      },
     },
   });
 }
