@@ -131,11 +131,14 @@ PROVIDERS: dict[str, OAuthProviderConfig] = {
         # goes through Meta (facebook.com) — this is by Meta's design, not a
         # bug in our code. The user lands on a Facebook consent screen that
         # lists "<App> would like to access your Instagram Business account".
+        # Scopes are exactly what Meta's "API setup with Facebook login"
+        # wizard surfaces under "Manage content on Instagram".
         name="instagram",
         authorize_url=f"https://www.facebook.com/{_META_API_VERSION}/dialog/oauth",
         token_url=f"https://graph.facebook.com/{_META_API_VERSION}/oauth/access_token",
         scopes=("instagram_basic", "instagram_content_publish",
-                "pages_show_list", "pages_read_engagement"),
+                "pages_show_list", "pages_read_engagement",
+                "business_management"),
         use_pkce=False,
     ),
     "threads": OAuthProviderConfig(

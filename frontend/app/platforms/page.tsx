@@ -38,7 +38,11 @@ export default function PlatformsPage() {
       });
       // Trigger provider OAuth. The redirect_uri is a frontend route that
       // re-relays code+state to the backend (preserves bearer auth).
-      const redirectUri = `${window.location.origin}/oauth/callback?platform_id=${created.id}`;
+      // Strict Mode on Meta/etc. requires an EXACT match between this URI and
+      // what's in the provider's whitelist — so no query string here. The
+      // platform_id is preserved across the redirect via sessionStorage; the
+      // OAuth `state` token is the cryptographic anti-CSRF tie.
+      const redirectUri = `${window.location.origin}/oauth/callback`;
       try {
         const { authorize_url } = await api.post<{ authorize_url: string }>(
           `/platforms/${created.id}/oauth/start?redirect_uri=${encodeURIComponent(redirectUri)}`,
@@ -234,12 +238,12 @@ function oauthHint(p: PluginInfo | null): string | null {
 }
 
 async function startReconnect(platformId: string) {
-  const redirectUri = `${window.location.origin}/oauth/callback?platform_id=${platformId}`;
+  const redirectUri = `${window.location.origin}/oauth/callback`;
+  sessionStorage.setItem('oauth_platform_id', platformId);
   const { authorize_url } = await api.post<{ authorize_url: string }>(
     `/platforms/${platformId}/oauth/start?redirect_uri=${encodeURIComponent(redirectUri)}`,
     {},
   );
-  sessionStorage.setItem('oauth_platform_id', platformId);
   window.location.href = authorize_url;
 }
 
