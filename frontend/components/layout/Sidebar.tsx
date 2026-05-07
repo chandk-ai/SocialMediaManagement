@@ -3,7 +3,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import {
   LayoutDashboard, Workflow, Plug, Database, FileText, Settings,
-  Zap, MessageSquareCheck, BarChart3, Calendar, ScrollText, X,
+  Zap, MessageSquare, BarChart3, Calendar, ScrollText, X,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -13,7 +13,7 @@ const items = [
   { href: '/calendar',  label: 'Calendar',   icon: Calendar },
   { href: '/workflows', label: 'Workflows',  icon: Workflow },
   { href: '/triggers',  label: 'Triggers',   icon: Zap },
-  { href: '/reviews',   label: 'Reviews',    icon: MessageSquareCheck },
+  { href: '/reviews',   label: 'Reviews',    icon: MessageSquare },
   { href: '/platforms', label: 'Platforms',  icon: Plug },
   { href: '/sources',   label: 'Sources',    icon: Database },
   { href: '/posts',     label: 'Posts',      icon: FileText },

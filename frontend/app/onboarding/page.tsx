@@ -15,7 +15,7 @@ import { Sidebar } from '@/components/layout/Sidebar';
 import { TopBar } from '@/components/layout/TopBar';
 import {
   CheckCircle2, Circle, Sparkles, Plug, Database, Workflow,
-  Zap, MessageSquareCheck, BarChart3, ArrowRight,
+  Zap, MessageSquare, BarChart3, ArrowRight,
 } from 'lucide-react';
 
 const STORAGE_KEY = 'smms.onboarding.v1';
@@ -75,7 +75,7 @@ const STEPS: Step[] = [
   },
   {
     id: 'review',
-    icon: MessageSquareCheck,
+    icon: MessageSquare,
     title: 'Review and approve',
     body: 'Workflows that need approval pause and ping you. Approve / Revise (with feedback) / Reject — the agents either publish, re-run with your notes, or cancel. Reviews can be resolved here or right inside WhatsApp / Telegram.',
     actions: [

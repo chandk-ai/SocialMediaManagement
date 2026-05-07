@@ -8,7 +8,7 @@ import { Sidebar } from '@/components/layout/Sidebar';
 import { TopBar } from '@/components/layout/TopBar';
 import { useApi, api } from '@/lib/api/client';
 import type { Review } from '@/lib/api/types';
-import { MessageSquareCheck, Check, X, Edit3 } from 'lucide-react';
+import { MessageSquare, Check, X, Edit3 } from 'lucide-react';
 import { useState } from 'react';
 import { mutate } from 'swr';
 
@@ -27,7 +27,7 @@ export default function ReviewsPage() {
           </p>
           {reviews && reviews.length === 0 ? (
             <EmptyState
-              icon={<MessageSquareCheck size={32} />}
+              icon={<MessageSquare size={32} />}
               title="Nothing to review"
               description="Workflows that need approval will land here."
             />

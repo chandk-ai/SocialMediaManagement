@@ -1,19 +1,28 @@
 /**
- * NextAuth options — Okta provider.
- * Set OKTA_ISSUER, OKTA_CLIENT_ID, OKTA_CLIENT_SECRET, NEXTAUTH_SECRET.
+ * NextAuth options — Okta provider, conditionally enabled.
+ *
+ * Okta is opt-in. If OKTA_ISSUER is set we register the provider; otherwise
+ * NextAuth runs with no providers and the frontend falls back to Supabase
+ * Auth directly via @supabase/ssr (the recommended path).
  */
 import type { NextAuthOptions } from 'next-auth';
+import type { Provider } from 'next-auth/providers/index';
 import OktaProvider from 'next-auth/providers/okta';
 
-export const authOptions: NextAuthOptions = {
-  providers: [
+const providers: Provider[] = [];
+if (process.env.OKTA_ISSUER && process.env.OKTA_CLIENT_ID && process.env.OKTA_CLIENT_SECRET) {
+  providers.push(
     OktaProvider({
-      clientId: process.env.OKTA_CLIENT_ID!,
-      clientSecret: process.env.OKTA_CLIENT_SECRET!,
-      issuer: process.env.OKTA_ISSUER!,
+      clientId: process.env.OKTA_CLIENT_ID,
+      clientSecret: process.env.OKTA_CLIENT_SECRET,
+      issuer: process.env.OKTA_ISSUER,
       authorization: { params: { scope: 'openid profile email offline_access' } },
     }),
-  ],
+  );
+}
+
+export const authOptions: NextAuthOptions = {
+  providers,
   session: { strategy: 'jwt', maxAge: 60 * 60 * 8 },
   callbacks: {
     async jwt({ token, account, profile }) {
@@ -23,7 +32,6 @@ export const authOptions: NextAuthOptions = {
         token.expiresAt = account.expires_at;
       }
       if (profile) {
-        // Map custom claims onto the session
         // @ts-expect-error -- custom claim
         token.role = profile['role'] || 'viewer';
         // @ts-expect-error -- custom claim
@@ -32,7 +40,6 @@ export const authOptions: NextAuthOptions = {
       return token;
     },
     async session({ session, token }) {
-      // expose only what the UI needs
       (session as any).accessToken = token.accessToken;
       (session as any).role = token.role;
       (session as any).orgId = token.orgId;
