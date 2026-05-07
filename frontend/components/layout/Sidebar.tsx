@@ -4,13 +4,14 @@ import { usePathname } from 'next/navigation';
 import {
   LayoutDashboard, Workflow, Plug, Database, FileText, Settings,
   Zap, MessageSquare, BarChart3, Calendar, ScrollText, X, Sparkles,
+  type LucideIcon,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 type NavItem = {
   href: string;
   label: string;
-  icon: React.ComponentType<{ size?: number }>;
+  icon: LucideIcon;
   group?: 'main' | 'help';
 };
 
