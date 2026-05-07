@@ -1,0 +1,126 @@
+# Render Blueprint — provisions API + worker + beat + Redis in one shot.
+# Database lives in Supabase (already migrated); this file only spins up
+# compute + a managed Redis instance for Celery's broker / cache.
+#
+# How to use:
+#   1. Push this repo to GitHub (one-time)
+#   2. Render dashboard → New + → Blueprint → pick the repo → Apply
+#   3. Render reads this file, prompts you to fill the `sync: false`
+#      env vars (Supabase URL/keys + LLM key), creates everything.
+
+services:
+  # ── Managed Redis (Celery broker + result backend + rate-limit + state cache)
+  - type: redis
+    name: smms-redis
+    plan: starter
+    ipAllowList: []                   # private to Render services
+    maxmemoryPolicy: allkeys-lru
+
+  # ── FastAPI web service
+  - type: web
+    name: smms-api
+    runtime: docker
+    rootDir: backend
+    plan: starter
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: ENV
+        value: prod
+      - key: PERSISTENCE_BACKEND
+        value: supabase
+      - key: AUTH_BACKEND
+        value: supabase
+      - key: OBS_LOG_JSON
+        value: "true"
+      - key: LLM_DEFAULT_PROVIDER
+        value: anthropic
+      - key: SEC_TOKEN_VAULT_MASTER_KEY
+        generateValue: true             # Render auto-generates a 32-byte secret
+
+      # ── Supabase — paste these in the Blueprint setup form
+      - key: SUPABASE_URL
+        sync: false                     # https://ukaulrxhegrqyfrirnkb.supabase.co
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false                     # Settings → API → service_role
+      - key: SUPABASE_JWT_SECRET
+        sync: false                     # Settings → API → JWT Settings
+      - key: SUPABASE_POSTGRES_CONNECTION_STRING
+        sync: false                     # postgresql+asyncpg://postgres.<ref>:<pwd>@...
+
+      # ── LLM key
+      - key: LLM_ANTHROPIC_API_KEY
+        sync: false
+
+      # ── Wired automatically from the Redis service
+      - key: REDIS_URL
+        fromService: { type: redis, name: smms-redis, property: connectionString }
+      - key: QUEUE_BROKER_URL
+        fromService: { type: redis, name: smms-redis, property: connectionString }
+      - key: QUEUE_RESULT_BACKEND
+        fromService: { type: redis, name: smms-redis, property: connectionString }
+
+  # ── Celery worker (drains workflows, publish, publish_dlq queues)
+  - type: worker
+    name: smms-worker
+    runtime: docker
+    rootDir: backend
+    plan: starter
+    dockerCommand: celery -A app.infrastructure.queue.celery_app.celery_app worker -Q workflows,publish,publish_dlq -l info
+    envVars:
+      - key: ENV
+        value: prod
+      - key: PERSISTENCE_BACKEND
+        value: supabase
+      - key: OBS_LOG_JSON
+        value: "true"
+      - key: SEC_TOKEN_VAULT_MASTER_KEY
+        fromService: { type: web, name: smms-api, envVarKey: SEC_TOKEN_VAULT_MASTER_KEY }
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      - key: SUPABASE_POSTGRES_CONNECTION_STRING
+        sync: false
+      - key: LLM_ANTHROPIC_API_KEY
+        sync: false
+      - key: LLM_DEFAULT_PROVIDER
+        value: anthropic
+      - key: REDIS_URL
+        fromService: { type: redis, name: smms-redis, property: connectionString }
+      - key: QUEUE_BROKER_URL
+        fromService: { type: redis, name: smms-redis, property: connectionString }
+      - key: QUEUE_RESULT_BACKEND
+        fromService: { type: redis, name: smms-redis, property: connectionString }
+
+  # ── Celery Beat (drives scheduled workflows + nightly metrics + engagement poll)
+  - type: worker
+    name: smms-beat
+    runtime: docker
+    rootDir: backend
+    plan: starter
+    dockerCommand: celery -A app.infrastructure.queue.celery_app.celery_app beat -l info
+    envVars:
+      - key: ENV
+        value: prod
+      - key: PERSISTENCE_BACKEND
+        value: supabase
+      - key: OBS_LOG_JSON
+        value: "true"
+      - key: SEC_TOKEN_VAULT_MASTER_KEY
+        fromService: { type: web, name: smms-api, envVarKey: SEC_TOKEN_VAULT_MASTER_KEY }
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      - key: SUPABASE_POSTGRES_CONNECTION_STRING
+        sync: false
+      - key: REDIS_URL
+        fromService: { type: redis, name: smms-redis, property: connectionString }
+      - key: QUEUE_BROKER_URL
+        fromService: { type: redis, name: smms-redis, property: connectionString }
+      - key: QUEUE_RESULT_BACKEND
+        fromService: { type: redis, name: smms-redis, property: connectionString }
