@@ -4,6 +4,7 @@ import { usePathname } from 'next/navigation';
 import {
   LayoutDashboard, Workflow, Plug, Database, FileText, Settings,
   Zap, MessageSquare, BarChart3, Calendar, ScrollText, X, Sparkles,
+  BookOpen,
   type LucideIcon,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -28,6 +29,7 @@ const items: NavItem[] = [
   { href: '/audit',      label: 'Audit log',  icon: ScrollText,      group: 'main' },
   // Help section — pinned to the bottom of the nav
   { href: '/onboarding', label: 'Get started', icon: Sparkles,       group: 'help' },
+  { href: '/help',       label: 'Help & docs', icon: BookOpen,       group: 'help' },
   { href: '/settings',   label: 'Settings',    icon: Settings,       group: 'help' },
 ];
 

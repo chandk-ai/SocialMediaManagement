@@ -48,6 +48,17 @@ This is an honest accounting of what's already in the repo vs. what's still need
 - **Security** — OIDC (Okta), Supabase Auth (HS256), AES-256-GCM token vault, RBAC, request-id propagation, rate limiting
 - **Deployment** — Docker Compose, Dockerfiles, GitHub Actions CI
 
+### Advanced features (v0.2)
+- **Campaign aggregate** — multi-step, cross-platform campaigns with internal causality (`teaser → launch → recap`); each step produces a directive-driven workflow run with optional `depends_on` ordering
+- **A/B/n experiments** — `Experiment` aggregate with EQUAL/HOLDOUT/BANDIT allocation, automatic winner selection from real metrics, per-variant publish status
+- **Performance feedback loop** — `PerformanceLearner` fits per-(org, plugin) Evaluator weights via closed-form OLS from past `(predicted_score, actual_engagement)` pairs; Evaluator can blend learned weights into `overall`
+- **Hashtag intelligence** — historical-engagement-weighted hashtag scoring per plugin with seed-text relevance boost
+- **Content recycling** — `RecyclePolicy` + `ContentRecyclerService` with VERBATIM / LIGHT_REWRITE / FULL_REGEN / THREAD_FROM_TOP strategies and per-policy cadence/cooldown
+- **Localization & translation** — N-locale fan-out with platform-aware tone hints and term-preservation for hashtags / URLs / @-mentions
+- **Approval policies (multi-step)** — `ApprovalPolicy` ladder with n-of-m sign-off, optional steps, delegate (vacation) backups, per-step review channel
+- **GDPR data export / delete** — `DataExportJob` aggregate, signed-URL bundle export, configurable grace window for cascading deletes
+- **Public REST surface** — `/campaigns`, `/experiments`, `/approvals`, `/recycling`, `/localization`, `/hashtags`, `/performance`, `/privacy` with full Pydantic schemas
+
 ---
 
 ## What's still missing — by priority
@@ -66,31 +77,31 @@ This is an honest accounting of what's already in the repo vs. what's still need
 
 These are what would make the product *win* against generic schedulers like Buffer / Hootsuite.
 
-| Feature | Why it's a wedge | What to build |
+| Feature | Status | What to build / what shipped |
 |---|---|---|
-| **Brand-voice fingerprint** | Most tools generate generic, "AI-flavored" content | Index the org's last 12 months of posts in a vector DB; the Executor RAG-retrieves the closest 5 high-engagement posts and constrains generation to that style. Add `voice_examples` to `WorkflowConfig` |
-| **Image + video generation pipeline** | Visual platforms (IG, TikTok, Pinterest) require media; the system should *make* it, not just consume it | Add a `MediaGenerator` plugin kind with adapters for DALL-E, Flux, Stable Diffusion, Midjourney via API, ElevenLabs (voice), HeyGen / Synthesia (video). The Planner emits `media_brief`s alongside `PostBlueprint`s; Executor renders both |
-| **Performance feedback loop** | The Evaluator scores predicted engagement but never *learns* | After publish, fetch real metrics via `fetch_metrics()` (already on the platform contract). Store on `Post.metrics`. A nightly job builds a regression model from historical scores → real CTR/likes; Evaluator weighting auto-tunes |
-| **AI-driven scheduling** | Posting at 09:00 UTC for everyone is suboptimal | Per-(account, content-type) "best-time" model from historical metrics; if `Schedule.kind = OPTIMAL`, the scheduler picks the slot |
-| **Engagement / reply triage** | Comments + DMs roll in after publishing — the agent should help drain that queue | New `EngagementSource` plugin (per-platform polling) + a `TriageAgent` that classifies sentiment, drafts replies, and pushes them through the same Review channel |
-| **Cross-platform campaign orchestration** | Today each post is an island | New `Campaign` aggregate: a sequence of posts across platforms over N days, with internal causality (e.g. teaser → launch → recap). Planner becomes campaign-aware |
-| **A/B variant testing** | Marketing teams need to learn what works | Generate `n` variants per draft, publish to a holdout cohort or split audiences, compare metrics, persist a "winning template" |
+| **Brand-voice fingerprint** | ✅ shipped (`BrandVoiceService`) | Org's prior posts indexed (memory/Redis/vector); Executor RAG-retrieves top-K and adds them to the prompt. `WorkflowConfig.use_brand_voice` toggles the path |
+| **Image + video generation pipeline** | 🔄 in progress (adapters skeleton in `adapters/media`) | Add `MediaGenerator` plugin kind for DALL-E, Flux, SD, Midjourney, ElevenLabs, HeyGen / Synthesia |
+| **Performance feedback loop** | ✅ shipped (`PerformanceLearner`) | Closed-form OLS over `(predicted, actual)` pairs per (org, plugin); per-dimension weights and intercept persisted; surfaced via `/performance/weights/{plugin}` and `/performance/fit` |
+| **AI-driven scheduling** | ✅ shipped (`OptimalScheduler`) | Per-platform peak-hour table + `Schedule.kind = OPTIMAL` route |
+| **Engagement / reply triage** | 🔄 in progress (`engagement_collector`, `agents/triage.py`) | Per-platform polling source + TriageAgent draft replies → review |
+| **Cross-platform campaign orchestration** | ✅ shipped (`Campaign` aggregate) | Multi-step campaigns with `depends_on`, kind-aware Planner directive; `/campaigns` REST surface and `execute_due_steps` walker |
+| **A/B variant testing** | ✅ shipped (`Experiment` aggregate) | EQUAL/HOLDOUT/BANDIT allocation, automatic winner selection, `/experiments` REST surface |
 
 ### P2 — Operational polish
 
-| Feature | Notes |
-|---|---|
-| **Analytics dashboard** | Aggregate impressions / engagement / cost per workflow; Recharts-driven, live via Supabase realtime |
-| **Visual content calendar** | Drag-and-drop month view; rescheduling rewrites `Post.scheduled_for` |
-| **Approval policies** | Multi-step approval (legal → marketing → exec); first-class `ApprovalPolicy` aggregate; vacation mode + delegation |
-| **Audit log UI** | Read-only timeline of every state-changing action — already persisted in Supabase, just needs a page |
-| **Cost dashboard** | Token + media-gen spend per org/workflow; budget alerts (we already track tokens + budget) |
-| **Compliance guardrails** | Pluggable rules engine (banned terms, regulated industries, claim-substantiation); per-org policies |
-| **Localization & translation** | One source post → N localised variants, optionally per platform |
-| **Hashtag intelligence** | `HashtagSource` plugin for trending tags + per-niche scoring |
-| **Content recycling** | Auto-republish evergreen posts on a long cadence with style refresh |
-| **GDPR data export / delete** | One-click org export + cascading delete; scheduled via a Celery job |
-| **Mobile app surface** | The WhatsApp/Telegram triggers already give you a "phone-first" UX; a proper PWA for Reviews would close the loop |
+| Feature | Status | Notes |
+|---|---|---|
+| **Analytics dashboard** | 🔄 in progress | Aggregate impressions / engagement / cost per workflow; Recharts-driven, live via Supabase realtime |
+| **Visual content calendar** | ✅ shipped (frontend `/calendar`) | Drag-and-drop month view; rescheduling rewrites `Post.scheduled_for` |
+| **Approval policies** | ✅ shipped (`ApprovalPolicy` + `ApprovalRequest`) | n-of-m sign-off, optional steps, delegate backups; `/approvals` REST surface |
+| **Audit log UI** | 🔄 in progress | Read-only timeline of every state-changing action — already persisted, needs page |
+| **Cost dashboard** | 🔄 in progress | Token + media-gen spend per org/workflow; budget alerts (we already track tokens + budget) |
+| **Compliance guardrails** | ✅ shipped (heuristics + LLM rubric in Critique) | Pluggable rules engine for banned terms / regulated industries; per-org policies |
+| **Localization & translation** | ✅ shipped (`LocalizationService`) | N-locale fan-out with platform-aware tone hints; preserve hashtags / URLs / @-mentions; `/localization/translate` REST endpoint |
+| **Hashtag intelligence** | ✅ shipped (`HashtagIntelligenceService`) | Historical-engagement-weighted scoring + seed-text relevance boost; `/hashtags/insights` and `/hashtags/suggest` |
+| **Content recycling** | ✅ shipped (`ContentRecyclerService`) | VERBATIM / LIGHT_REWRITE / FULL_REGEN / THREAD_FROM_TOP strategies; per-policy cadence/cooldown; `/recycling/policies` REST surface |
+| **GDPR data export / delete** | ✅ shipped (`DataPrivacyService`) | Signed-URL bundle export, configurable grace window for cascading deletes; `/privacy/jobs` REST surface |
+| **Mobile app surface** | 🔄 in progress | WhatsApp/Telegram triggers already give a "phone-first" UX; PWA for Reviews would close the loop |
 
 ### P3 — Nice-to-have
 
@@ -106,12 +117,16 @@ These are what would make the product *win* against generic schedulers like Buff
 
 ## Recommended next sprint (1 week)
 
-If we keep building on this foundation, the order with the best ROI is:
+The previous sprint shipped a large chunk of the P1/P2 backlog (Campaigns,
+Experiments, Performance Learner, Hashtag Intel, Content Recycling,
+Localization, Multi-step Approvals, GDPR Privacy). The next high-ROI bets
+are the items still marked 🔄:
 
 1. **Real OAuth** for the top-4 platforms (LinkedIn, X, FB/IG, YouTube) — unlocks production usage
 2. **Celery Beat scheduler + DLQ retry** — the system becomes self-running
-3. **Brand-voice fingerprint** (P1.1) — by far the biggest user-perceived quality jump and what most justify-the-spend pitches turn on
-4. **Image generation plugin kind** (P1.2) — IG/Pinterest become *creative* targets, not just text dumps
-5. **Performance feedback loop** (P1.3) — the Evaluator stops guessing and starts learning
+3. **Image generation plugin kind** — IG / Pinterest / TikTok become *creative* targets, not just text dumps
+4. **Engagement Triage Agent** — drains the inbound comment / DM queue with the same review pipeline
+5. **Supabase mirrors for the new aggregates** (Campaigns, Experiments, Approvals, Recycling, Privacy, Hashtag insights) so cross-restart durability matches the rest of the platform
 
-After that, the Engagement Triage Agent + Campaign aggregate are the two features that turn this from "an SMB tool" into "an enterprise content operating system".
+After that, the Analytics Dashboard + Cost Dashboard turn the now-rich
+backend telemetry into a story the buyer can pitch internally.

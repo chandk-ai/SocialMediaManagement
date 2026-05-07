@@ -16,8 +16,14 @@ from app.core.security import Principal, get_current_user
 from app.plugins.manager import PluginManager
 from app.plugins.registry import PluginRegistry
 from app.repositories import (
+    InMemoryApprovalPolicyRepository,
+    InMemoryApprovalRequestRepository,
+    InMemoryCampaignRepository,
+    InMemoryDataExportJobRepository,
+    InMemoryExperimentRepository,
     InMemoryPlatformRepository,
     InMemoryPostRepository,
+    InMemoryRecyclePolicyRepository,
     InMemoryReviewSessionRepository,
     InMemorySourceRepository,
     InMemoryTriggerRepository,
@@ -26,6 +32,14 @@ from app.repositories import (
     InMemoryWorkflowRunRepository,
 )
 from app.services import (
+    ApprovalPolicyService,
+    CampaignService,
+    ContentRecyclerService,
+    DataPrivacyService,
+    ExperimentService,
+    HashtagIntelligenceService,
+    LocalizationService,
+    PerformanceLearner,
     PlatformService,
     PluginService,
     PostService,
@@ -85,6 +99,15 @@ def _build_repos(settings: Settings | None = None) -> dict:
             "user":     SupabaseUserRepository(sm),
             "trigger":  SupabaseTriggerRepository(sm),
             "review":   SupabaseReviewSessionRepository(sm),
+            # New aggregates fall back to in-memory until Supabase mirrors
+            # are implemented; data persists for the lifetime of the
+            # process which is sufficient for the current beta.
+            "campaign":         InMemoryCampaignRepository(),
+            "experiment":       InMemoryExperimentRepository(),
+            "approval_policy":  InMemoryApprovalPolicyRepository(),
+            "approval_request": InMemoryApprovalRequestRepository(),
+            "recycle":          InMemoryRecyclePolicyRepository(),
+            "data_export":      InMemoryDataExportJobRepository(),
         }
     return _memory_repos()
 
@@ -99,6 +122,16 @@ def _memory_repos() -> dict:
         "user":     InMemoryUserRepository(),
         "trigger":  InMemoryTriggerRepository(),
         "review":   InMemoryReviewSessionRepository(),
+        # New aggregates introduced for advanced features. These always
+        # use the in-memory backend even on Supabase deployments because
+        # their Supabase mirrors haven't shipped yet — the data is still
+        # available via the API but resets on app restart.
+        "campaign":         InMemoryCampaignRepository(),
+        "experiment":       InMemoryExperimentRepository(),
+        "approval_policy":  InMemoryApprovalPolicyRepository(),
+        "approval_request": InMemoryApprovalRequestRepository(),
+        "recycle":          InMemoryRecyclePolicyRepository(),
+        "data_export":      InMemoryDataExportJobRepository(),
     }
 
 
@@ -168,6 +201,92 @@ def get_llm_credentials_service():
 
 async def build_dev_workflow_service() -> WorkflowService:
     return get_workflow_service()
+
+
+# ── Advanced feature services ─────────────────────────────────────────────
+def get_campaign_service() -> CampaignService:
+    repos = _build_repos()
+    return CampaignService(
+        repo=repos["campaign"],
+        wf_repo=repos["workflow"],
+        wf_service=get_workflow_service(),
+    )
+
+
+def get_experiment_service() -> ExperimentService:
+    repos = _build_repos()
+    return ExperimentService(
+        repo=repos["experiment"],
+        post_repo=repos["post"],
+        platform_repo=repos["platform"],
+        registry=get_registry(),
+    )
+
+
+def get_approval_policy_service() -> ApprovalPolicyService:
+    repos = _build_repos()
+    return ApprovalPolicyService(
+        policy_repo=repos["approval_policy"],
+        request_repo=repos["approval_request"],
+        post_repo=repos["post"],
+    )
+
+
+def get_content_recycler() -> ContentRecyclerService:
+    repos = _build_repos()
+    return ContentRecyclerService(
+        repo=repos["recycle"],
+        post_repo=repos["post"],
+        platform_repo=repos["platform"],
+        wf_repo=repos["workflow"],
+        wf_service=get_workflow_service(),
+        llm=None,
+    )
+
+
+def get_localization_service() -> LocalizationService | None:
+    """Returns None when no LLM provider is configured — the route can
+    return 503 in that case."""
+    try:
+        from app.adapters.llm.mock import MockLLM   # type: ignore[attr-defined]
+        return LocalizationService(MockLLM())
+    except Exception:                                                 # noqa: BLE001
+        return None
+
+
+def get_hashtag_intelligence_service() -> HashtagIntelligenceService:
+    repos = _build_repos()
+    return HashtagIntelligenceService(
+        post_repo=repos["post"],
+        platform_repo=repos["platform"],
+    )
+
+
+def get_performance_learner() -> PerformanceLearner:
+    repos = _build_repos()
+    return PerformanceLearner(
+        post_repo=repos["post"],
+        platform_repo=repos["platform"],
+    )
+
+
+def get_data_privacy_service() -> DataPrivacyService:
+    repos = _build_repos()
+    return DataPrivacyService(
+        job_repo=repos["data_export"],
+        platform_repo=repos["platform"],
+        source_repo=repos["source"],
+        workflow_repo=repos["workflow"],
+        run_repo=repos["run"],
+        post_repo=repos["post"],
+        trigger_repo=repos["trigger"],
+        review_repo=repos["review"],
+        campaign_repo=repos.get("campaign"),
+        experiment_repo=repos.get("experiment"),
+        approval_policy_repo=repos.get("approval_policy"),
+        approval_request_repo=repos.get("approval_request"),
+        recycle_repo=repos.get("recycle"),
+    )
 
 
 def current_user(user: Principal = Depends(get_current_user)) -> Principal:
