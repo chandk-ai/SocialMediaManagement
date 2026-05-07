@@ -7,14 +7,17 @@ import { EmptyState } from '@/components/ui/EmptyState';
 import { Sidebar } from '@/components/layout/Sidebar';
 import { TopBar } from '@/components/layout/TopBar';
 import { useApi, api } from '@/lib/api/client';
+import { ApiErrorBanner } from '@/components/ui/ApiErrorBanner';
 import type { PluginInfo, Platform, PlatformGroup } from '@/lib/api/types';
 import { Plug, Plus, Star, X } from 'lucide-react';
 import { useState } from 'react';
 import { mutate } from 'swr';
 
 export default function PlatformsPage() {
-  const { data: plugins } = useApi<PluginInfo[]>('/plugins?kind=platform');
-  const { data: groups } = useApi<PlatformGroup[]>('/platforms/grouped');
+  const { data: plugins, error: pluginsErr, mutate: retryPlugins } =
+    useApi<PluginInfo[]>('/plugins?kind=platform');
+  const { data: groups, error: groupsErr, mutate: retryGroups } =
+    useApi<PlatformGroup[]>('/platforms/grouped');
   const [adding, setAdding] = useState<PluginInfo | null>(null);
   const [label, setLabel] = useState('');
   const [handle, setHandle] = useState('');
@@ -39,6 +42,9 @@ export default function PlatformsPage() {
       <div className="flex-1 flex flex-col overflow-hidden">
         <TopBar title="Platforms" />
         <main className="flex-1 overflow-y-auto p-6 space-y-8">
+          <ApiErrorBanner error={pluginsErr || groupsErr}
+                          retry={() => { retryPlugins(); retryGroups(); }} />
+
           {/* Connected accounts, grouped by plugin */}
           <section>
             <div className="flex items-end justify-between mb-3">

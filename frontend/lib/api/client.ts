@@ -1,22 +1,41 @@
 'use client';
 
 /**
- * Thin API client. All requests hit /api/proxy/* which Next rewrites to the
- * backend. The session token is added by the proxy route handler so the
- * browser never holds it.
+ * Thin API client + a typed `useApi` SWR hook. Errors are surfaced two ways:
+ * 1. `useApi` returns SWR's `error` object so pages can render a banner
+ * 2. Imperative callers (`api.post`) get a typed `ApiError` they can catch
  */
 import useSWR, { type SWRConfiguration } from 'swr';
 
 const BASE = '/api/proxy';
 
+export class ApiError extends Error {
+  status: number;
+  detail: string;
+  url: string;
+  constructor(status: number, detail: string, url: string) {
+    super(`${status} on ${url} — ${detail}`);
+    this.status = status;
+    this.detail = detail;
+    this.url = url;
+  }
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
+  const url = `${BASE}${path}`;
+  const res = await fetch(url, {
     headers: { 'Content-Type': 'application/json', ...(init.headers || {}) },
     ...init,
   });
   if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`${res.status} ${res.statusText} – ${body.slice(0, 200)}`);
+    let detail = res.statusText;
+    try {
+      const body = await res.json();
+      detail = body?.detail || body?.message || JSON.stringify(body);
+    } catch {
+      try { detail = await res.text(); } catch { /* ignore */ }
+    }
+    throw new ApiError(res.status, detail || 'Unknown error', url);
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
@@ -30,5 +49,13 @@ export const api = {
 };
 
 export function useApi<T>(path: string | null, opts?: SWRConfiguration) {
-  return useSWR<T>(path, (p: string) => api.get<T>(p), opts);
+  return useSWR<T, ApiError>(
+    path,
+    (p: string) => api.get<T>(p),
+    {
+      revalidateOnFocus: false,
+      shouldRetryOnError: false,
+      ...opts,
+    },
+  );
 }

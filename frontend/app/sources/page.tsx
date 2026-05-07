@@ -7,14 +7,17 @@ import { Sidebar } from '@/components/layout/Sidebar';
 import { TopBar } from '@/components/layout/TopBar';
 import { Input } from '@/components/ui/Input';
 import { useApi, api } from '@/lib/api/client';
+import { ApiErrorBanner } from '@/components/ui/ApiErrorBanner';
 import type { PluginInfo, Source } from '@/lib/api/types';
 import { Database, Plus } from 'lucide-react';
 import { useState } from 'react';
 import { mutate } from 'swr';
 
 export default function SourcesPage() {
-  const { data: plugins } = useApi<PluginInfo[]>('/plugins?kind=source');
-  const { data: sources } = useApi<Source[]>('/sources');
+  const { data: plugins, error: pluginsErr, mutate: retryPlugins } =
+    useApi<PluginInfo[]>('/plugins?kind=source');
+  const { data: sources, error: sourcesErr, mutate: retrySources } =
+    useApi<Source[]>('/sources');
   const [chosen, setChosen] = useState<PluginInfo | null>(null);
   const [name, setName] = useState('');
   const [config, setConfig] = useState('{}');
@@ -36,6 +39,8 @@ export default function SourcesPage() {
       <div className="flex-1 flex flex-col overflow-hidden">
         <TopBar title="Sources" />
         <main className="flex-1 overflow-y-auto p-6 space-y-6">
+          <ApiErrorBanner error={pluginsErr || sourcesErr}
+                          retry={() => { retryPlugins(); retrySources(); }} />
           <section>
             <h2 className="text-sm font-semibold text-ink-700 mb-3">Configured sources</h2>
             {sources && sources.length === 0 ? (
