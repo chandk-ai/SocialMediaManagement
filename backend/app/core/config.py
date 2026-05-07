@@ -57,7 +57,10 @@ def supabase_asyncpg_connect_args(url: str) -> dict[str, Any]:
     transaction-mode pooler (Supavisor / pgbouncer). Disables the
     prepared-statement cache that breaks under tx pooling."""
     if "pooler.supabase.com" in (url or ""):
-        return {"statement_cache_size": 0, "prepared_statement_cache_size": 0}
+        # `statement_cache_size=0` is the well-supported asyncpg switch.
+        # We intentionally do NOT set `prepared_statement_cache_size` —
+        # older asyncpg builds reject it and crash every request.
+        return {"statement_cache_size": 0}
     return {}
 
 
