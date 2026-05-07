@@ -1,28 +1,40 @@
 /**
- * Next.js middleware — guard authenticated routes.
+ * Route guard — redirect unauthenticated users to /login.
  *
- * Anything not in the PUBLIC list is gated behind a NextAuth session token.
- * No session → redirect to /login with the target URL preserved.
+ * Recognises Supabase Auth sessions (cookie-based via @supabase/ssr) and
+ * NextAuth sessions (legacy, only if Okta is enabled).
  */
 import { NextResponse, type NextRequest } from 'next/server';
-import { getToken } from 'next-auth/jwt';
+import { getMiddlewareSupabase } from '@/lib/auth/supabase-server';
 
 const PUBLIC = [
-  '/login', '/signup', '/onboarding/welcome',
-  '/api/auth', '/_next', '/favicon.ico', '/api/proxy/health',
+  '/login', '/signup',
+  '/api/auth',                  // NextAuth callback paths (Okta SSO)
+  '/_next', '/favicon.ico',
+  '/api/proxy/health',          // backend health proxy (anonymous OK)
 ];
 
 export async function middleware(req: NextRequest) {
   const path = req.nextUrl.pathname;
   if (PUBLIC.some(p => path.startsWith(p))) return NextResponse.next();
 
-  const token = await getToken({
-    req,
-    secret: process.env.NEXTAUTH_SECRET,
-  });
-  // Allow dev token bypass in local mode
-  const devBypass = process.env.DEV_BEARER_TOKEN && process.env.NODE_ENV !== 'production';
-  if (token || devBypass) return NextResponse.next();
+  // Build a response we can attach rotated cookies to.
+  const res = NextResponse.next();
+  const supa = getMiddlewareSupabase(req, res);
+  const { data: { user } } = await supa.auth.getUser();
+  if (user) return res;
+
+  // Optional NextAuth fallback (only matters when Okta is configured).
+  try {
+    const { getToken } = await import('next-auth/jwt');
+    const tok = await getToken({ req, secret: process.env.NEXTAUTH_SECRET });
+    if (tok) return res;
+  } catch { /* NextAuth not configured — fine */ }
+
+  // Dev escape hatch — only outside production.
+  if (process.env.NODE_ENV !== 'production' && process.env.DEV_BEARER_TOKEN) {
+    return res;
+  }
 
   const url = req.nextUrl.clone();
   url.pathname = '/login';

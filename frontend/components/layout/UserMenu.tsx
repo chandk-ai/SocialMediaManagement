@@ -1,15 +1,25 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
-import { LogOut, Settings, User as UserIcon, BookOpen } from 'lucide-react';
+import { LogOut, Settings, BookOpen } from 'lucide-react';
 import Link from 'next/link';
-import { signOut, useSession } from 'next-auth/react';
+import { useRouter } from 'next/navigation';
+import { getSupabase } from '@/lib/auth/supabase';
+import type { User } from '@supabase/supabase-js';
 
 export function UserMenu() {
   const [open, setOpen] = useState(false);
+  const [user, setUser] = useState<User | null>(null);
   const ref = useRef<HTMLDivElement>(null);
-  const { data: session } = useSession();
-  const initials = (session?.user?.name || session?.user?.email || 'U')
-    .split(/\s+/).slice(0, 2).map(s => s[0]?.toUpperCase()).join('');
+  const router = useRouter();
+
+  useEffect(() => {
+    const sb = getSupabase();
+    sb.auth.getUser().then(({ data }) => setUser(data.user ?? null));
+    const { data: sub } = sb.auth.onAuthStateChange((_e, session) => {
+      setUser(session?.user ?? null);
+    });
+    return () => sub.subscription.unsubscribe();
+  }, []);
 
   useEffect(() => {
     if (!open) return;
@@ -20,6 +30,17 @@ export function UserMenu() {
     return () => window.removeEventListener('mousedown', onClick);
   }, [open]);
 
+  async function signOut() {
+    const sb = getSupabase();
+    await sb.auth.signOut();
+    router.replace('/login');
+    router.refresh();
+  }
+
+  const display = user?.user_metadata?.display_name || user?.email || 'User';
+  const initials = display.split(/\s+|@/).slice(0, 2)
+    .map((s: string) => s[0]?.toUpperCase()).join('');
+
   return (
     <div className="relative" ref={ref}>
       <button
@@ -27,13 +48,13 @@ export function UserMenu() {
         className="size-8 rounded-full bg-accent text-accent-fg flex items-center justify-center text-xs font-medium"
         aria-label="Open user menu"
       >
-        {initials}
+        {initials || 'U'}
       </button>
       {open && (
         <div className="absolute right-0 mt-2 w-56 card p-2 z-50 text-sm">
           <div className="px-3 py-2 border-b border-ink-200 mb-1">
-            <div className="font-medium truncate">{session?.user?.name || 'Anonymous'}</div>
-            <div className="text-xs text-ink-500 truncate">{session?.user?.email || '—'}</div>
+            <div className="font-medium truncate">{display}</div>
+            <div className="text-xs text-ink-500 truncate">{user?.email || '—'}</div>
           </div>
           <Link href="/onboarding" className="flex items-center gap-2 px-3 py-2 hover:bg-ink-100 rounded-lg">
             <BookOpen size={14} /> Onboarding
@@ -42,7 +63,7 @@ export function UserMenu() {
             <Settings size={14} /> Settings
           </Link>
           <button
-            onClick={() => signOut({ callbackUrl: '/login' })}
+            onClick={signOut}
             className="w-full flex items-center gap-2 px-3 py-2 text-red-600 hover:bg-red-50 rounded-lg"
           >
             <LogOut size={14} /> Sign out
