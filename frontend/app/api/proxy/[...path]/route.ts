@@ -11,7 +11,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getServerSupabase } from '@/lib/auth/supabase-server';
 
-const BACKEND = process.env.BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+// Strip any trailing slash so we never produce `//api/v1/...`.
+const BACKEND = (process.env.BACKEND_URL
+              || process.env.NEXT_PUBLIC_API_URL
+              || 'http://localhost:8000').replace(/\/+$/, '');
 
 async function resolveBearerToken(req: NextRequest): Promise<string> {
   // 1. Supabase session
