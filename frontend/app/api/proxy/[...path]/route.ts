@@ -17,14 +17,21 @@ const BACKEND = (process.env.BACKEND_URL
               || 'http://localhost:8000').replace(/\/+$/, '');
 
 async function resolveBearerToken(req: NextRequest): Promise<string> {
-  // 1. Supabase session
+  // 1. Inbound Authorization header (browser-attached Supabase token).
+  //    This is the primary path — see frontend/lib/api/client.ts.
+  const inbound = req.headers.get('authorization');
+  if (inbound && /^Bearer\s+\S+/i.test(inbound)) {
+    return inbound.replace(/^Bearer\s+/i, '').trim();
+  }
+
+  // 2. Supabase session via @supabase/ssr cookies (fallback if cookies sync).
   try {
     const supa = getServerSupabase();
     const { data } = await supa.auth.getSession();
     if (data.session?.access_token) return data.session.access_token;
   } catch { /* not configured */ }
 
-  // 2. NextAuth (Okta)
+  // 3. NextAuth (Okta)
   try {
     const { getToken } = await import('next-auth/jwt');
     const tok = await getToken({ req, secret: process.env.NEXTAUTH_SECRET });
@@ -32,7 +39,7 @@ async function resolveBearerToken(req: NextRequest): Promise<string> {
     if (typeof at === 'string') return at;
   } catch { /* not configured */ }
 
-  // 3. Dev fallback
+  // 4. Dev fallback
   return process.env.DEV_BEARER_TOKEN || '';
 }
 
