@@ -43,6 +43,19 @@ export type Source = {
   created_at: string;
 };
 
+export type WorkflowConfig = {
+  tone: string;
+  audience: string;
+  voice_guide?: string | null;
+  max_revisions?: number;
+  quality_threshold?: number;
+  low_quality_threshold?: number;
+  require_human_approval?: boolean;
+  llm_provider?: string;
+  llm_model?: string;
+  extra?: Record<string, unknown>;
+};
+
 export type Workflow = {
   id: string;
   name: string;
@@ -50,6 +63,7 @@ export type Workflow = {
   status: 'draft' | 'active' | 'paused' | 'archived';
   source_ids: string[];
   platform_ids: string[];
+  config?: WorkflowConfig;
   schedule: { kind: string; cron?: string; interval_minutes?: number; run_at?: string; timezone: string };
   created_at: string;
   updated_at: string;

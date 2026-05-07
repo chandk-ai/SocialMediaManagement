@@ -133,9 +133,9 @@ export default function WorkflowDetailPage() {
                   <dt className="text-ink-500">Schedule</dt>
                   <dd>{describeSchedule(workflow)}</dd>
                   <dt className="text-ink-500">Tone / audience</dt>
-                  <dd>{workflow.config?.tone}{workflow.config?.audience ? ` · ${workflow.config.audience}` : ''}</dd>
+                  <dd>{describeVoice(workflow)}</dd>
                   <dt className="text-ink-500">Human approval</dt>
-                  <dd>{(workflow.config as any)?.require_human_approval ? 'Required' : 'Auto-publish on approve'}</dd>
+                  <dd>{workflow.config?.require_human_approval ? 'Required' : 'Auto-publish on approve'}</dd>
                 </dl>
               </Card>
 
@@ -276,6 +276,12 @@ function platformLabels(w: Workflow, groups: PlatformGroup[]): string {
     })
     .filter(Boolean)
     .join(', ');
+}
+
+function describeVoice(w: Workflow): string {
+  const tone = w.config?.tone ?? '—';
+  const audience = w.config?.audience;
+  return audience ? `${tone} · ${audience}` : tone;
 }
 
 function describeSchedule(w: Workflow): string {

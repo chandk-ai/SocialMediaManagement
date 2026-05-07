@@ -531,12 +531,14 @@ function SettingsDialog({ account, pluginInfo, onClose }: {
                 onChange={(e) => setPagePick(e.target.value)}
               >
                 <option value="">— pick a Page —</option>
-                {availablePages.map(p => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                    {p.instagram_business_account?.username && ` · @${p.instagram_business_account.username}`}
-                  </option>
-                ))}
+                {availablePages.map(p => {
+                  const ig = p.instagram_business_account?.username;
+                  return (
+                    <option key={p.id} value={p.id}>
+                      {p.name}{ig ? ` · @${ig}` : ''}
+                    </option>
+                  );
+                })}
               </select>
             </div>
           )}
