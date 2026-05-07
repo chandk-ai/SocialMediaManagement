@@ -25,13 +25,24 @@ def _supabase_project_ref(url: str) -> str | None:
 def _normalize_supabase_db_url(url: str, project_ref: str | None) -> str:
     """Make a Supabase Postgres URL safe for asyncpg + Supavisor.
 
+    * Always uses the async driver: rewrites bare ``postgresql://`` and
+      ``postgres://`` to ``postgresql+asyncpg://`` so SQLAlchemy doesn't try to
+      load psycopg2 (which we don't ship).
     * Pooler hosts (``*.pooler.supabase.com``) require a tenant-scoped username
       ``postgres.<project_ref>`` — bare ``postgres`` produces
-      ``InternalServerError: Tenant or user not found``.
-    * No-op if the URL already includes the project-ref or isn't a pooler URL.
+      ``InternalServerError: Tenant or user not found``. Rewrites if needed.
+    * No-op for non-postgres URLs.
     """
     if not url:
         return url
+
+    # 1. Force the async driver so we never accidentally hit psycopg2.
+    if url.startswith("postgresql://"):
+        url = "postgresql+asyncpg://" + url[len("postgresql://") :]
+    elif url.startswith("postgres://"):
+        url = "postgresql+asyncpg://" + url[len("postgres://") :]
+
+    # 2. Inject project-ref into pooler username if missing.
     try:
         parts = urlsplit(url)
     except ValueError:
