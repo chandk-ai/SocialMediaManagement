@@ -40,7 +40,9 @@ async def _poll_async() -> int:
         platform_repo=repos["platform"], registry=registry,
         llm=MockProvider(),                                # swap with workflow LLM
     )
-    rv = ReviewService(repos["review"], registry)
+    # Review service kept available for follow-on persistence; not consumed
+    # in this pass (drafts persist directly via repos["review"].add).
+    _ = ReviewService(repos["review"], registry)
     yielded = 0
     orgs = list(getattr(repos["platform"], "_s", {}).keys())
     for org_id in orgs:
