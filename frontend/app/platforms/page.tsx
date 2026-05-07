@@ -187,6 +187,12 @@ export default function PlatformsPage() {
                   />
                 </div>
               </div>
+              {oauthHint(adding) && (
+                <div className="mt-3 flex items-start gap-2 text-xs text-blue-800 bg-blue-50 border border-blue-200 rounded-lg p-2">
+                  <span aria-hidden>ℹ️</span>
+                  <span>{oauthHint(adding)}</span>
+                </div>
+              )}
               {warning && (
                 <div className="mt-3 flex items-start gap-2 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2">
                   <AlertTriangle size={14} className="mt-0.5 shrink-0" />
@@ -207,6 +213,24 @@ export default function PlatformsPage() {
       </div>
     </div>
   );
+}
+
+function oauthHint(p: PluginInfo | null): string | null {
+  if (!p) return null;
+  switch (p.name) {
+    case 'instagram':
+      return 'Instagram Business/Creator accounts authorize through Meta — you’ll see a Facebook consent screen listing your linked IG account. This is by Meta’s design.';
+    case 'threads':
+      return 'Threads has its own OAuth (independent of Facebook).';
+    case 'facebook':
+      return 'You’ll be asked to choose which Facebook Page to grant access to.';
+    case 'youtube':
+      return 'YouTube authorizes through Google. Make sure your channel is associated with the signed-in Google account.';
+    case 'tiktok':
+      return 'TikTok requires a registered TikTok-for-Business app and an approved “content publish” scope.';
+    default:
+      return null;
+  }
 }
 
 async function startReconnect(platformId: string) {

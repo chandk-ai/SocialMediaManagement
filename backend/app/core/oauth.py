@@ -92,6 +92,10 @@ class OAuthProviderConfig:
     extra_token_params: dict[str, str] | None = None
 
 
+# Meta Graph API version used for Facebook / Instagram / Threads.
+# Bumping versions is a coordinated change because deprecated versions get sunset.
+_META_API_VERSION = "v21.0"
+
 # Curated config for the platforms we ship adapters for. Add more by importing
 # this module and registering — keeps the social-platform adapter files thin.
 PROVIDERS: dict[str, OAuthProviderConfig] = {
@@ -103,29 +107,44 @@ PROVIDERS: dict[str, OAuthProviderConfig] = {
         use_pkce=False,            # LinkedIn doesn't support PKCE on web app type
     ),
     "twitter": OAuthProviderConfig(
+        # X kept the twitter.com OAuth host for compatibility. Both work; we
+        # use x.com because that's what X's developer docs publish today.
         name="twitter",
-        authorize_url="https://twitter.com/i/oauth2/authorize",
-        token_url="https://api.twitter.com/2/oauth2/token",
-        refresh_url="https://api.twitter.com/2/oauth2/token",
+        authorize_url="https://x.com/i/oauth2/authorize",
+        token_url="https://api.x.com/2/oauth2/token",
+        refresh_url="https://api.x.com/2/oauth2/token",
         scopes=("tweet.read", "tweet.write", "users.read", "offline.access"),
         use_pkce=True,
-        client_auth_in_body=False,  # Twitter requires Basic auth header
+        client_auth_in_body=False,  # X requires Basic auth header
     ),
     "facebook": OAuthProviderConfig(
         name="facebook",
-        authorize_url="https://www.facebook.com/v19.0/dialog/oauth",
-        token_url="https://graph.facebook.com/v19.0/oauth/access_token",
+        authorize_url=f"https://www.facebook.com/{_META_API_VERSION}/dialog/oauth",
+        token_url=f"https://graph.facebook.com/{_META_API_VERSION}/oauth/access_token",
         scopes=("pages_manage_posts", "pages_read_engagement",
                 "pages_show_list", "business_management"),
         use_pkce=False,
     ),
     "instagram": OAuthProviderConfig(
-        # IG Business uses the same Meta OAuth; scopes differ.
+        # NOTE: posting to Instagram requires an IG *Business* or *Creator*
+        # account that is linked to a Facebook Page. The OAuth flow therefore
+        # goes through Meta (facebook.com) — this is by Meta's design, not a
+        # bug in our code. The user lands on a Facebook consent screen that
+        # lists "<App> would like to access your Instagram Business account".
         name="instagram",
-        authorize_url="https://www.facebook.com/v19.0/dialog/oauth",
-        token_url="https://graph.facebook.com/v19.0/oauth/access_token",
+        authorize_url=f"https://www.facebook.com/{_META_API_VERSION}/dialog/oauth",
+        token_url=f"https://graph.facebook.com/{_META_API_VERSION}/oauth/access_token",
         scopes=("instagram_basic", "instagram_content_publish",
                 "pages_show_list", "pages_read_engagement"),
+        use_pkce=False,
+    ),
+    "threads": OAuthProviderConfig(
+        # Threads has its OWN OAuth (independent of Facebook) since 2024.
+        name="threads",
+        authorize_url="https://threads.net/oauth/authorize",
+        token_url="https://graph.threads.net/oauth/access_token",
+        refresh_url="https://graph.threads.net/refresh_access_token",
+        scopes=("threads_basic", "threads_content_publish"),
         use_pkce=False,
     ),
     "youtube": OAuthProviderConfig(
@@ -142,7 +161,7 @@ PROVIDERS: dict[str, OAuthProviderConfig] = {
     ),
     "tiktok": OAuthProviderConfig(
         name="tiktok",
-        authorize_url="https://www.tiktok.com/v2/auth/authorize",
+        authorize_url="https://www.tiktok.com/v2/auth/authorize/",
         token_url="https://open.tiktokapis.com/v2/oauth/token/",
         refresh_url="https://open.tiktokapis.com/v2/oauth/token/",
         scopes=("user.info.basic", "video.upload", "video.publish"),
@@ -156,6 +175,7 @@ PROVIDERS: dict[str, OAuthProviderConfig] = {
         scopes=("submit", "identity", "read"),
         use_pkce=False,
         client_auth_in_body=False,
+        extra_authorize_params={"duration": "permanent"},  # required for refresh tokens
     ),
     "pinterest": OAuthProviderConfig(
         name="pinterest",
@@ -166,6 +186,35 @@ PROVIDERS: dict[str, OAuthProviderConfig] = {
         use_pkce=False,
         client_auth_in_body=False,
     ),
+    "discord": OAuthProviderConfig(
+        name="discord",
+        authorize_url="https://discord.com/api/oauth2/authorize",
+        token_url="https://discord.com/api/oauth2/token",
+        refresh_url="https://discord.com/api/oauth2/token",
+        scopes=("bot", "applications.commands"),
+        use_pkce=False,
+        client_auth_in_body=True,
+    ),
+    "slack": OAuthProviderConfig(
+        name="slack",
+        authorize_url="https://slack.com/oauth/v2/authorize",
+        token_url="https://slack.com/api/oauth.v2.access",
+        scopes=("chat:write", "channels:read", "groups:read"),
+        use_pkce=False,
+        client_auth_in_body=True,
+    ),
+}
+
+
+# Some providers share a single OAuth app — e.g. one Meta app handles
+# Facebook + Instagram + Threads, one Google Cloud app handles YouTube.
+# Map: plugin_name → "shared family" name. When env vars for the plugin
+# itself are missing, we fall back to the family name.
+_CREDENTIAL_FAMILY: dict[str, str] = {
+    "facebook":  "meta",
+    "instagram": "meta",
+    "threads":   "meta",
+    "youtube":   "google",
 }
 
 
@@ -268,12 +317,54 @@ class OAuthError(Exception):
     pass
 
 
+# Process-singleton state store shared by every OAuthClient. Without this,
+# the state nonce stored during `authorize_url` is invisible to the request
+# that handles the callback — every request would otherwise spin up its own
+# in-memory store and "state not found or expired" would always fire.
+_GLOBAL_STATE_STORE: StateStore | None = None
+
+
+def _get_state_store() -> StateStore:
+    global _GLOBAL_STATE_STORE
+    if _GLOBAL_STATE_STORE is None:
+        _GLOBAL_STATE_STORE = StateStore(redis_url=os.getenv("REDIS_URL"))
+    return _GLOBAL_STATE_STORE
+
+
+def _resolve_credentials(plugin_name: str) -> tuple[str, str]:
+    """Look up client_id / client_secret for a plugin.
+
+    Order:
+      1. ``<PLUGIN>_CLIENT_ID`` / ``<PLUGIN>_CLIENT_SECRET`` (per-plugin)
+      2. Shared family fallback for plugins that share a Meta/Google app
+         (``META_CLIENT_ID`` covers facebook + instagram + threads;
+         ``GOOGLE_CLIENT_ID`` covers youtube).
+    """
+    cid = os.getenv(f"{plugin_name.upper()}_CLIENT_ID", "")
+    cs  = os.getenv(f"{plugin_name.upper()}_CLIENT_SECRET", "")
+    if cid and cs:
+        return cid, cs
+    family = _CREDENTIAL_FAMILY.get(plugin_name)
+    if family:
+        cid = cid or os.getenv(f"{family.upper()}_CLIENT_ID", "")
+        cs  = cs  or os.getenv(f"{family.upper()}_CLIENT_SECRET", "")
+    return cid, cs
+
+
 # Convenience factory used by the API layer.
 def get_oauth_client(plugin_name: str) -> OAuthClient:
     """Build a client from environment-supplied client_id/secret."""
     provider = PROVIDERS.get(plugin_name)
     if provider is None:
         raise OAuthError(f"no OAuth provider registered for {plugin_name!r}")
-    cid = os.getenv(f"{plugin_name.upper()}_CLIENT_ID", "")
-    cs  = os.getenv(f"{plugin_name.upper()}_CLIENT_SECRET", "")
-    return OAuthClient(provider, client_id=cid, client_secret=cs)
+    cid, cs = _resolve_credentials(plugin_name)
+    if not cid or not cs:
+        family = _CREDENTIAL_FAMILY.get(plugin_name)
+        hint = (
+            f" Set {plugin_name.upper()}_CLIENT_ID + {plugin_name.upper()}_CLIENT_SECRET"
+            + (f" (or the shared {family.upper()}_CLIENT_ID/{family.upper()}_CLIENT_SECRET)" if family else "")
+            + " on the backend service."
+        )
+        raise OAuthError(f"OAuth credentials not configured for {plugin_name!r}.{hint}")
+    return OAuthClient(provider, client_id=cid, client_secret=cs,
+                       state_store=_get_state_store())
