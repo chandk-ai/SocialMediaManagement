@@ -21,6 +21,7 @@ class MediumPlatform(SocialPlatform):
     capabilities = PlatformCapabilities(
         text_only=True, image=True, video=False, gif=False, document=False,
         threads=False, scheduling=False, analytics=True,
+        experimental=True,   # Medium API was deprecated April 2024
     )
     max_text_length = 100000
     max_hashtags = 5    # Medium calls them tags

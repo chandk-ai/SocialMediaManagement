@@ -77,12 +77,58 @@ class WorkflowService:
     async def list(self, org_id: OrgId) -> list[Workflow]:
         return await self.repo.list(org_id)
 
+    async def update(
+        self, *, org_id: OrgId, workflow_id: WorkflowId,
+        name: str | None = None, description: str | None = None,
+        source_ids: list | None = None, platform_ids: list | None = None,
+        config: WorkflowConfig | None = None, schedule: Schedule | None = None,
+        target_selector: TargetSelector | None = None,
+    ) -> Workflow:
+        wf = await self.repo.get(org_id, workflow_id)
+        if not wf:
+            raise ValueError("workflow not found")
+        if name is not None:           wf.name = name
+        if description is not None:    wf.description = description
+        if source_ids is not None:     wf.source_ids = list(source_ids)
+        if platform_ids is not None:   wf.platform_ids = list(platform_ids)
+        if config is not None:         wf.config = config
+        if schedule is not None:       wf.schedule = schedule
+        if target_selector is not None: wf.target_selector = target_selector
+        return await self.repo.update(wf)
+
+    async def delete(self, org_id: OrgId, workflow_id: WorkflowId) -> None:
+        await self.repo.delete(org_id, workflow_id)
+
     async def activate(self, org_id: OrgId, workflow_id: WorkflowId) -> Workflow:
         wf = await self.repo.get(org_id, workflow_id)
         if not wf:
             raise ValueError("workflow not found")
         wf.activate()
         return await self.repo.update(wf)
+
+    async def pause(self, org_id: OrgId, workflow_id: WorkflowId) -> Workflow:
+        wf = await self.repo.get(org_id, workflow_id)
+        if not wf:
+            raise ValueError("workflow not found")
+        wf.pause()
+        return await self.repo.update(wf)
+
+    async def duplicate(self, org_id: OrgId, workflow_id: WorkflowId) -> Workflow:
+        """Create a fresh draft copy of an existing workflow."""
+        src = await self.repo.get(org_id, workflow_id)
+        if not src:
+            raise ValueError("workflow not found")
+        copy = Workflow.create(
+            org_id=org_id,
+            name=f"{src.name} (copy)",
+            description=src.description,
+            source_ids=list(src.source_ids),
+            platform_ids=list(src.platform_ids),
+            config=src.config,
+            schedule=src.schedule,
+            target_selector=src.target_selector,
+        )
+        return await self.repo.add(copy)
 
     # ── Pipeline entry-points ────────────────────────────────────────
     async def run(self, org_id: OrgId, workflow_id: WorkflowId) -> WorkflowRun:
@@ -379,12 +425,24 @@ class WorkflowService:
             )
 
     async def _publish(self, post: Post, draft: DraftPost, target) -> None:
+        from app.adapters.platforms.base import PlatformNotImplemented
         from app.core.rate_limit import get_rate_governor
         governor = get_rate_governor()
         await governor.acquire(target.plugin_name,
                                account_id=str(target.id))
         entry = self.registry.get(PluginKind.PLATFORM, target.plugin_name)
         adapter: SocialPlatform = entry.cls(credentials=target.credentials, config=target.config)
+        # Guard: refuse silent fakes. Adapters with `experimental=True` can be
+        # listed in the UI but cannot publish until a real implementation exists.
+        if getattr(adapter.capabilities, "experimental", False):
+            msg = (
+                f"{adapter.display_name or target.plugin_name} publishing is in "
+                f"preview — real API integration is not wired up yet. "
+                f"This post is held as 'failed' instead of being silently faked."
+            )
+            post.mark_failed(msg)
+            await self.post_repo.update(post)
+            raise PlatformNotImplemented(msg)
         try:
             payload = PostPayload(text=draft.text, hashtags=draft.hashtags, media=draft.media)
             result = await adapter.publish(payload)

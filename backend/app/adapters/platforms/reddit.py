@@ -21,6 +21,7 @@ class RedditPlatform(SocialPlatform):
     capabilities = PlatformCapabilities(
         text_only=True, image=True, video=True, gif=False, document=False,
         threads=False, scheduling=False, analytics=False,
+        experimental=True,
     )
     max_text_length = 40000
     max_hashtags = 0   # subreddits prefer flair; hashtags are usually noise

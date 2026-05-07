@@ -49,17 +49,22 @@ class SQLDatabaseSource(ContentSource):
             raise SourceConnectionError("only one statement per query is allowed")
         if not q.lower().startswith("select"):
             raise SourceConnectionError("only SELECT queries are allowed")
-
-    async def fetch(self, since: datetime | None = None) -> AsyncIterator[SourceItem]:
         try:
             from sqlalchemy import create_engine, text
-        except ImportError:
-            yield SourceItem(
-                external_id="stub-1", title="(SQL stub)",
-                body="Install SQLAlchemy + driver to run real queries.",
-                url=None, published_at=datetime.utcnow(),
-            )
-            return
+        except ImportError as exc:                                # pragma: no cover
+            raise SourceConnectionError(
+                "SQLAlchemy is not installed on the backend.",
+            ) from exc
+        # Live ping — proves URL + credentials + driver are usable.
+        try:
+            engine = create_engine(self.config["url"], pool_pre_ping=True)
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+        except Exception as exc:                                  # noqa: BLE001
+            raise SourceConnectionError(str(exc)) from exc
+
+    async def fetch(self, since: datetime | None = None) -> AsyncIterator[SourceItem]:
+        from sqlalchemy import create_engine, text                # imported in connect()
         engine = create_engine(self.config["url"], pool_pre_ping=True)
         title_col = self.config.get("title_column", "title")
         body_col = self.config.get("body_column", "body")

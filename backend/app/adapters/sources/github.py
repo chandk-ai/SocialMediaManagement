@@ -4,10 +4,12 @@ from __future__ import annotations
 from datetime import datetime
 from typing import AsyncIterator
 
+import httpx
+
 from app.domain.entities.source import SourceItem
 from app.plugins.registry import register_plugin
 
-from .base import ContentSource
+from .base import ContentSource, SourceConnectionError
 
 
 @register_plugin("source", "github", api_version="1.0")
@@ -26,13 +28,26 @@ class GitHubSource(ContentSource):
     }
 
     async def connect(self) -> None:
-        return None
+        repo = self.config.get("repo", "")
+        if "/" not in repo:
+            raise SourceConnectionError(
+                "repo must be in 'owner/name' format (e.g. anthropics/claude-code)",
+            )
+        headers = {"Accept": "application/vnd.github+json"}
+        if self.config.get("token"):
+            headers["Authorization"] = f"Bearer {self.config['token']}"
+        try:
+            async with httpx.AsyncClient(timeout=10.0, headers=headers) as client:
+                r = await client.get(f"https://api.github.com/repos/{repo}")
+                if r.status_code == 404:
+                    raise SourceConnectionError(f"repo {repo!r} not found (or private — set a token)")
+                if r.status_code == 401:
+                    raise SourceConnectionError("GitHub token rejected (401)")
+                r.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise SourceConnectionError(str(exc)) from exc
 
     async def fetch(self, since: datetime | None = None) -> AsyncIterator[SourceItem]:
-        try:
-            import httpx
-        except ImportError:
-            return
         repo = self.config["repo"]
         kind = self.config.get("kind", "releases")
         headers = {"Accept": "application/vnd.github+json"}

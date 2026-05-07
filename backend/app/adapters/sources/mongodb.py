@@ -37,22 +37,21 @@ class MongoDBSource(ContentSource):
     async def connect(self) -> None:
         try:
             from motor.motor_asyncio import AsyncIOMotorClient
-        except ImportError:
-            return
+        except ImportError as exc:                              # pragma: no cover
+            raise SourceConnectionError(
+                "motor is not installed on the backend; cannot connect to MongoDB.",
+            ) from exc
         try:
-            self._client = AsyncIOMotorClient(self.config["uri"], serverSelectionTimeoutMS=5000)
-            await self._client.server_info()
-        except Exception as exc:                          # noqa: BLE001
+            self._client = AsyncIOMotorClient(
+                self.config["uri"], serverSelectionTimeoutMS=5000,
+            )
+            await self._client.admin.command("ping")
+        except Exception as exc:                                # noqa: BLE001
             raise SourceConnectionError(str(exc)) from exc
 
     async def fetch(self, since: datetime | None = None) -> AsyncIterator[SourceItem]:
         if self._client is None:
-            yield SourceItem(
-                external_id="stub-1", title="(MongoDB stub)",
-                body="Install motor to query a real MongoDB.",
-                url=None, published_at=datetime.utcnow(),
-            )
-            return
+            await self.connect()
         coll = self._client[self.config["database"]][self.config["collection"]]
         flt = dict(self.config.get("filter", {}))
         date_field = self.config.get("date_field", "updatedAt")

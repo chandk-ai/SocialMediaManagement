@@ -3,8 +3,14 @@ from __future__ import annotations
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel
 
-from app.api.deps import current_user, get_platform_service, get_plugin_service
+from app.api.deps import (
+    current_user,
+    get_platform_service,
+    get_plugin_service,
+    get_workflow_service,
+)
 from app.core.security import Principal
 from app.domain.value_objects.ids import OrgId, PlatformId
 from app.plugins.registry import PluginKind
@@ -15,6 +21,7 @@ from app.schemas.platforms import (
 )
 from app.services.platform_service import PlatformService
 from app.services.plugin_service import PluginService
+from app.services.workflow_service import WorkflowService
 
 router = APIRouter()
 
@@ -79,6 +86,17 @@ async def create_platform(
     return _to_out(p)
 
 
+@router.delete("/{platform_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_platform(
+    platform_id: UUID,
+    user: Principal = Depends(current_user),
+    svc: PlatformService = Depends(get_platform_service),
+) -> None:
+    if not user.role.can_edit():
+        raise HTTPException(status_code=403, detail="Editor role required")
+    await svc.repo.delete(OrgId(UUID(user.org_id)), PlatformId(platform_id))
+
+
 @router.post("/{platform_id}/oauth/start")
 async def oauth_start(
     platform_id: UUID,
@@ -115,7 +133,13 @@ async def oauth_callback(
     user: Principal = Depends(current_user),
     svc: PlatformService = Depends(get_platform_service),
 ) -> dict:
-    """Exchange the auth code for tokens; persist encrypted on this Platform row."""
+    """Exchange the auth code for tokens; persist encrypted on this Platform row.
+
+    For Meta-family plugins (facebook, instagram), this also enriches
+    ``config`` with the chosen Page id + Page access token + linked IG user id
+    by calling ``/me/accounts`` on the Graph API. Without this enrichment,
+    the FB / IG adapters can't publish (they need a Page-scoped token).
+    """
     from app.core.oauth import OAuthError, get_oauth_client
     from app.core.secrets import build_token_vault
     from app.domain.value_objects.credentials import EncryptedToken, OAuthCredentials
@@ -150,7 +174,202 @@ async def oauth_callback(
         account_id=token.raw.get("user_id") or token.raw.get("account_id") or "",
         account_handle=token.raw.get("screen_name") or token.raw.get("name"),
     )
+
+    # Provider-specific post-OAuth enrichment so adapters have what they need.
+    enriched_config = dict(p.config or {})
+    pages_available: list[dict] = []
+    if p.plugin_name in ("facebook", "instagram", "threads"):
+        try:
+            pages_available = await _fetch_meta_pages_and_ig(
+                user_token=token.access_token,
+                want_instagram=(p.plugin_name == "instagram"),
+            )
+        except Exception:                                       # noqa: BLE001
+            pages_available = []
+        # Auto-pick if only one Page; otherwise leave for the user to choose
+        # via the Settings dialog (Page picker) before publishing.
+        if len(pages_available) == 1:
+            page = pages_available[0]
+            enriched_config["page_id"] = page["id"]
+            enriched_config["page_name"] = page.get("name", "")
+            if page.get("page_access_token"):
+                enriched_config["page_access_token"] = page["page_access_token"]
+            if p.plugin_name == "instagram" and page.get("instagram_business_account"):
+                enriched_config["ig_user_id"] = page["instagram_business_account"].get("id")
+                enriched_config["ig_username"] = page["instagram_business_account"].get("username")
+            creds = OAuthCredentials(
+                access_token=creds.access_token,
+                refresh_token=creds.refresh_token,
+                scopes=creds.scopes,
+                account_id=enriched_config.get("ig_user_id") or page["id"],
+                account_handle=enriched_config.get("ig_username") or page.get("name"),
+            )
+
+    p.config = enriched_config
+    if pages_available:
+        p.config["__pages_available__"] = pages_available
     p.mark_connected(creds)
     await svc.repo.update(p)
-    return {"platform_id": str(platform_id), "status": p.status.value,
-            "account_id": creds.account_id}
+    return {
+        "platform_id": str(platform_id),
+        "status": p.status.value,
+        "account_id": creds.account_id,
+        "pages_available": len(pages_available),
+        "needs_picker": len(pages_available) > 1,
+    }
+
+
+async def _fetch_meta_pages_and_ig(*, user_token: str, want_instagram: bool) -> list[dict]:
+    """Call /me/accounts → list of Pages with per-Page tokens. For each Page,
+    look up its linked Instagram Business Account if requested."""
+    import httpx
+    from app.core.oauth import _META_API_VERSION  # noqa: PLC2701  (constant)
+    base = f"https://graph.facebook.com/{_META_API_VERSION}"
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        r = await client.get(
+            f"{base}/me/accounts",
+            params={"access_token": user_token, "fields": "id,name,access_token"},
+        )
+        r.raise_for_status()
+        pages = r.json().get("data", [])
+        if want_instagram:
+            for page in pages:
+                try:
+                    ri = await client.get(
+                        f"{base}/{page['id']}",
+                        params={
+                            "access_token": page.get("access_token", user_token),
+                            "fields": "instagram_business_account{id,username}",
+                        },
+                    )
+                    if ri.status_code < 400:
+                        page["instagram_business_account"] = (
+                            ri.json().get("instagram_business_account")
+                        )
+                except Exception:                                # noqa: BLE001
+                    pass
+        # Rename keys: Graph uses `access_token`; we want `page_access_token` to
+        # be unambiguous in our config dict.
+        for page in pages:
+            if "access_token" in page:
+                page["page_access_token"] = page.pop("access_token")
+        return pages
+
+
+class PagePickBody(BaseModel):
+    page_id: str
+
+
+@router.post("/{platform_id}/page/select")
+async def select_page(
+    platform_id: UUID,
+    body: PagePickBody,
+    user: Principal = Depends(current_user),
+    svc: PlatformService = Depends(get_platform_service),
+) -> dict:
+    """When a Meta user has multiple Pages, they pick one with this endpoint.
+    Copies the chosen Page's id + token (and linked IG account) into ``config``."""
+    p = await svc.repo.get(OrgId(UUID(user.org_id)), PlatformId(platform_id))
+    if p is None:
+        raise HTTPException(status_code=404, detail="platform not found")
+    pages = (p.config or {}).get("__pages_available__") or []
+    page = next((x for x in pages if x.get("id") == body.page_id), None)
+    if page is None:
+        raise HTTPException(status_code=400, detail="page_id not in available list")
+    cfg = dict(p.config or {})
+    cfg["page_id"] = page["id"]
+    cfg["page_name"] = page.get("name", "")
+    if page.get("page_access_token"):
+        cfg["page_access_token"] = page["page_access_token"]
+    ig = page.get("instagram_business_account") or {}
+    if p.plugin_name == "instagram" and ig:
+        cfg["ig_user_id"] = ig.get("id")
+        cfg["ig_username"] = ig.get("username")
+    p.config = cfg
+    await svc.repo.update(p)
+    return {"ok": True, "page_id": page["id"]}
+
+
+class PlatformUpdateBody(BaseModel):
+    display_name: str | None = None
+    tags: list[str] | None = None
+    is_default: bool | None = None
+    config: dict | None = None
+
+
+@router.patch("/{platform_id}", response_model=PlatformOut)
+async def update_platform(
+    platform_id: UUID,
+    body: PlatformUpdateBody,
+    user: Principal = Depends(current_user),
+    svc: PlatformService = Depends(get_platform_service),
+) -> PlatformOut:
+    if not user.role.can_edit():
+        raise HTTPException(status_code=403, detail="Editor role required")
+    p = await svc.repo.get(OrgId(UUID(user.org_id)), PlatformId(platform_id))
+    if p is None:
+        raise HTTPException(status_code=404, detail="platform not found")
+    if body.display_name is not None: p.display_name = body.display_name
+    if body.tags is not None:         p.tags = list(body.tags)
+    if body.config is not None:       p.config = {**p.config, **body.config}
+    if body.is_default is True:
+        # Clear default on other accounts of the same plugin
+        for other in await svc.repo.list(OrgId(UUID(user.org_id))):
+            if other.id != p.id and other.plugin_name == p.plugin_name and other.is_default:
+                other.is_default = False
+                await svc.repo.update(other)
+        p.is_default = True
+    elif body.is_default is False:
+        p.is_default = False
+    await svc.repo.update(p)
+    return _to_out(p)
+
+
+@router.post("/{platform_id}/test_publish")
+async def test_publish(
+    platform_id: UUID,
+    user: Principal = Depends(current_user),
+    svc: PlatformService = Depends(get_platform_service),
+) -> dict:
+    """Send a small "Hello from SMMS — please ignore" test post end-to-end so
+    the user can verify connectivity before scheduling real workflows."""
+    from app.adapters.platforms.base import PlatformNotImplemented, PostPayload
+    from app.plugins.registry import PluginKind, get_global_registry
+    p = await svc.repo.get(OrgId(UUID(user.org_id)), PlatformId(platform_id))
+    if p is None:
+        raise HTTPException(status_code=404, detail="platform not found")
+    entry = get_global_registry().get(PluginKind.PLATFORM, p.plugin_name)
+    adapter = entry.cls(credentials=p.credentials, config=p.config)
+    if getattr(adapter.capabilities, "experimental", False):
+        return {"ok": False,
+                "error": f"{adapter.display_name} is in preview — real publishing not yet wired."}
+    payload = PostPayload(
+        text="Hello from SMMS — please ignore. (test publish)",
+        hashtags=[],
+        media=[],
+    )
+    try:
+        result = await adapter.publish(payload)
+        return {"ok": True, "external_post_id": result.external_post_id, "url": result.url}
+    except PlatformNotImplemented as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:                                     # noqa: BLE001
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+@router.get("/{platform_id}/usage")
+async def platform_usage(
+    platform_id: UUID,
+    user: Principal = Depends(current_user),
+    svc: PlatformService = Depends(get_platform_service),       # noqa: ARG001
+    workflows: WorkflowService = Depends(get_workflow_service),
+) -> dict:
+    """Workflows that publish to this account."""
+    org_id = OrgId(UUID(user.org_id))
+    all_wf = await workflows.list(org_id)
+    matched = [
+        {"id": str(w.id), "name": w.name, "status": w.status.value}
+        for w in all_wf
+        if str(platform_id) in [str(p) for p in w.platform_ids]
+    ]
+    return {"count": len(matched), "workflows": matched}

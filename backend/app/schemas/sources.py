@@ -21,4 +21,8 @@ class SourceOut(APIModel):
     is_active: bool
     config: dict
     last_fetched_at: datetime | None = None
+    last_failure_at: datetime | None = None
+    last_error: str | None = None
+    error_count: int = 0
+    item_count: int = 0
     created_at: datetime

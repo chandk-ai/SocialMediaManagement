@@ -26,6 +26,7 @@ class YouTubePlatform(SocialPlatform):
         text_only=False,         # video required for video uploads
         image=False, video=True, gif=False, document=False,
         threads=False, scheduling=True, analytics=True,
+        experimental=True,
     )
     max_text_length = 5000       # description
     max_hashtags = 15

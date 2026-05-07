@@ -21,6 +21,7 @@ class BlueskyPlatform(SocialPlatform):
     capabilities = PlatformCapabilities(
         text_only=True, image=True, video=False, gif=False, document=False,
         threads=True, scheduling=False, analytics=False,
+        experimental=True,
     )
     max_text_length = 300
     max_hashtags = 10

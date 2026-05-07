@@ -18,6 +18,7 @@ export type Platform = {
   status: 'disconnected' | 'connected' | 'expired' | 'error';
   config: Record<string, unknown>;
   is_default?: boolean;
+  tags?: string[];
   created_at: string;
   last_used_at: string | null;
 };
@@ -35,6 +36,10 @@ export type Source = {
   is_active: boolean;
   config: Record<string, unknown>;
   last_fetched_at: string | null;
+  last_failure_at?: string | null;
+  last_error?: string | null;
+  error_count?: number;
+  item_count?: number;
   created_at: string;
 };
 

@@ -4,11 +4,13 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, AsyncIterator
 
+import httpx
+
 from app.core.logging import get_logger
 from app.domain.entities.source import SourceItem
 from app.plugins.registry import register_plugin
 
-from .base import ContentSource
+from .base import ContentSource, SourceConnectionError
 
 log = get_logger(__name__)
 
@@ -30,7 +32,34 @@ class YouTubeSource(ContentSource):
     }
 
     async def connect(self) -> None:
-        return None
+        api_key = self.config.get("api_key", "")
+        channel_id = self.config.get("channel_id", "")
+        if not api_key:
+            raise SourceConnectionError(
+                "YouTube Data API v3 key is required. "
+                "Get one in Google Cloud Console → APIs & Services → Credentials.",
+            )
+        if not channel_id.startswith("UC") or len(channel_id) < 10:
+            raise SourceConnectionError(
+                "channel_id should start with 'UC'. You can find it on the channel's "
+                "About page → Share channel → Copy channel ID.",
+            )
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.get(
+                    "https://www.googleapis.com/youtube/v3/channels",
+                    params={"key": api_key, "id": channel_id, "part": "id"},
+                )
+                if r.status_code == 403:
+                    raise SourceConnectionError(
+                        "API key rejected (403). Check that YouTube Data API v3 "
+                        "is enabled for this key and your daily quota isn't exhausted.",
+                    )
+                r.raise_for_status()
+                if not r.json().get("items"):
+                    raise SourceConnectionError(f"channel {channel_id!r} not found")
+        except httpx.HTTPError as exc:
+            raise SourceConnectionError(str(exc)) from exc
 
     async def fetch(self, since: datetime | None = None) -> AsyncIterator[SourceItem]:
         videos = await self._list_videos()
@@ -49,17 +78,9 @@ class YouTubeSource(ContentSource):
             )
 
     async def _list_videos(self) -> list[dict[str, Any]]:
-        try:
-            import httpx
-        except ImportError:
-            return []
         api_key = self.config.get("api_key", "")
         if not api_key:
-            return [{
-                "id": "stub", "title": "(YouTube stub)",
-                "description": "Set api_key to fetch real videos",
-                "publishedAt": datetime.utcnow().isoformat() + "Z",
-            }]
+            return []
         max_results = int(self.config.get("max_results", 10))
         async with httpx.AsyncClient(timeout=15.0) as client:
             r = await client.get(

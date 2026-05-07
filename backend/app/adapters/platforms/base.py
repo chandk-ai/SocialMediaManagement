@@ -29,6 +29,11 @@ class PlatformCapabilities:
     threads: bool = False           # X threads, Mastodon, etc.
     scheduling: bool = True         # native scheduling supported
     analytics: bool = True
+    experimental: bool = False      # set True until publish() actually hits the real API
+
+
+class PlatformNotImplemented(Exception):
+    """Raised by an experimental adapter's publish() to prevent silent fakes."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,3 +104,24 @@ class SocialPlatform(ABC):
 
     async def delete(self, external_post_id: str) -> bool:
         return False
+
+    # ── helpers shared by all adapters ────────────────────────────────
+    def _access_token(self) -> str:
+        """Decrypt the access token. Returns '' if no credentials set."""
+        if not self.credentials or not self.credentials.access_token:
+            return ""
+        from app.core.secrets import build_token_vault
+        try:
+            return build_token_vault().decrypt(self.credentials.access_token)
+        except Exception:                                   # noqa: BLE001
+            return ""
+
+    def _require_real(self) -> None:
+        """Adapters still in 'reference implementation' mode call this in
+        publish() to refuse silent fakes. Real adapters override or skip."""
+        if self.capabilities.experimental:
+            raise PlatformNotImplemented(
+                f"{self.display_name or self.plugin_name} publishing is not yet "
+                f"implemented end-to-end. Posts targeted at this platform are "
+                f"blocked until a real API integration is wired up."
+            )

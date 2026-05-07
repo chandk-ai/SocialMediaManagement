@@ -44,6 +44,20 @@ class VectorDBSource(ContentSource):
         backend = self.config.get("backend", "")
         if backend not in SUPPORTED:
             raise SourceConnectionError(f"unsupported backend: {backend!r}")
+        # Verify the SDK is importable (lazy, per-backend so we don't force install of all four).
+        try:
+            if backend == "pinecone":
+                import pinecone  # noqa: F401
+            elif backend == "chroma":
+                import chromadb  # noqa: F401
+            elif backend == "qdrant":
+                import qdrant_client  # noqa: F401
+            elif backend == "weaviate":
+                import weaviate  # noqa: F401
+        except ImportError as exc:                                # pragma: no cover
+            raise SourceConnectionError(
+                f"{backend} SDK is not installed on the backend.",
+            ) from exc
 
     async def fetch(self, since: datetime | None = None) -> AsyncIterator[SourceItem]:
         backend = self.config["backend"]
@@ -51,12 +65,7 @@ class VectorDBSource(ContentSource):
             results = await _dispatch(backend, self.config)
         except Exception as exc:                          # noqa: BLE001
             log.warning("vector_db_query_failed", backend=backend, error=str(exc))
-            yield SourceItem(
-                external_id="stub-1", title=f"({backend} stub)",
-                body=f"Install the {backend} client to run real queries.",
-                url=None, published_at=datetime.utcnow(),
-            )
-            return
+            raise SourceConnectionError(f"{backend} query failed: {exc}") from exc
         title_f = self.config.get("title_field", "title")
         body_f = self.config.get("body_field", "text")
         for r in results:

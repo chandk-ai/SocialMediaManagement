@@ -25,6 +25,7 @@ class TikTokPlatform(SocialPlatform):
     capabilities = PlatformCapabilities(
         text_only=False, image=True, video=True, gif=False, document=False,
         threads=False, scheduling=False, analytics=True,
+        experimental=True,
     )
     max_text_length = 2200
     max_hashtags = 30

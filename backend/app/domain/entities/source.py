@@ -18,7 +18,22 @@ class Source:
     config: dict = field(default_factory=dict)
     is_active: bool = True
     last_fetched_at: datetime | None = None
+    last_failure_at: datetime | None = None
+    last_error: str | None = None
+    error_count: int = 0
+    item_count: int = 0
     created_at: datetime = field(default_factory=datetime.utcnow)
+
+    def mark_success(self, items_yielded: int) -> None:
+        self.last_fetched_at = datetime.utcnow()
+        self.last_error = None
+        self.error_count = 0
+        self.item_count = items_yielded
+
+    def mark_failure(self, message: str) -> None:
+        self.last_failure_at = datetime.utcnow()
+        self.last_error = (message or "")[:1000]
+        self.error_count += 1
 
     @classmethod
     def create(cls, *, org_id: OrgId, plugin_name: str, display_name: str,

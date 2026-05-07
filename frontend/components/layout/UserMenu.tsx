@@ -1,6 +1,6 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
-import { LogOut, Settings, BookOpen } from 'lucide-react';
+import { LogOut, Settings } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { getSupabase } from '@/lib/auth/supabase';
@@ -56,9 +56,6 @@ export function UserMenu() {
             <div className="font-medium truncate">{display}</div>
             <div className="text-xs text-ink-500 truncate">{user?.email || '—'}</div>
           </div>
-          <Link href="/onboarding" className="flex items-center gap-2 px-3 py-2 hover:bg-ink-100 rounded-lg">
-            <BookOpen size={14} /> Onboarding
-          </Link>
           <Link href="/settings" className="flex items-center gap-2 px-3 py-2 hover:bg-ink-100 rounded-lg">
             <Settings size={14} /> Settings
           </Link>

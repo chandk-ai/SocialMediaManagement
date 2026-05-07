@@ -21,6 +21,7 @@ class MastodonPlatform(SocialPlatform):
     capabilities = PlatformCapabilities(
         text_only=True, image=True, video=True, gif=True, document=False,
         threads=True, scheduling=True, analytics=True,
+        experimental=True,
     )
     max_text_length = 500
     max_hashtags = 30

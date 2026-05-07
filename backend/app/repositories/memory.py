@@ -50,6 +50,9 @@ class InMemoryPlatformRepository:
         self._s.for_org(p.org_id)[p.id] = p
         return p
 
+    async def delete(self, org_id: OrgId, platform_id: PlatformId) -> None:
+        self._s.for_org(org_id).pop(platform_id, None)
+
 
 class InMemorySourceRepository:
     def __init__(self) -> None:
@@ -69,6 +72,9 @@ class InMemorySourceRepository:
         self._s.for_org(s.org_id)[s.id] = s
         return s
 
+    async def delete(self, org_id: OrgId, sid: SourceId) -> None:
+        self._s.for_org(org_id).pop(sid, None)
+
 
 class InMemoryWorkflowRepository:
     def __init__(self) -> None:
@@ -87,6 +93,9 @@ class InMemoryWorkflowRepository:
     async def update(self, w: Workflow) -> Workflow:
         self._s.for_org(w.org_id)[w.id] = w
         return w
+
+    async def delete(self, org_id: OrgId, wid: WorkflowId) -> None:
+        self._s.for_org(org_id).pop(wid, None)
 
 
 class InMemoryWorkflowRunRepository:
@@ -134,6 +143,9 @@ class InMemoryPostRepository:
     async def update(self, p: Post) -> Post:
         self._s.for_org(p.org_id)[p.id] = p
         return p
+
+    async def delete(self, org_id: OrgId, post_id: PostId) -> None:
+        self._s.for_org(org_id).pop(post_id, None)
 
 
 class InMemoryUserRepository:

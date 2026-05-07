@@ -81,7 +81,12 @@ def _source_to_domain(orm: SourceORM) -> Source:
         id=SourceId(orm.id), org_id=OrgId(orm.org_id),
         plugin_name=orm.plugin_name, display_name=orm.display_name,
         is_active=orm.is_active, config=dict(orm.config or {}),
-        last_fetched_at=orm.last_fetched_at, created_at=orm.created_at,
+        last_fetched_at=orm.last_fetched_at,
+        last_failure_at=getattr(orm, "last_failure_at", None),
+        last_error=getattr(orm, "last_error", None),
+        error_count=getattr(orm, "error_count", 0) or 0,
+        item_count=getattr(orm, "item_count", 0) or 0,
+        created_at=orm.created_at,
     )
 
 
@@ -89,6 +94,11 @@ def _source_to_orm(d: Source) -> SourceORM:
     return SourceORM(
         id=d.id, org_id=d.org_id, plugin_name=d.plugin_name,
         display_name=d.display_name, is_active=d.is_active, config=d.config,
+        last_fetched_at=d.last_fetched_at,
+        last_failure_at=d.last_failure_at,
+        last_error=d.last_error,
+        error_count=d.error_count,
+        item_count=d.item_count,
     )
 
 
@@ -260,6 +270,16 @@ class SupabasePlatformRepository(_Base):
             await s.commit()
         return p
 
+    async def delete(self, org_id: OrgId, platform_id: PlatformId) -> None:
+        async with self._sm() as s:
+            await s.execute(
+                delete(PlatformORM).where(
+                    PlatformORM.id == platform_id,
+                    PlatformORM.org_id == org_id,
+                ),
+            )
+            await s.commit()
+
 
 class SupabaseSourceRepository(_Base):
     async def add(self, src: Source) -> Source:
@@ -290,6 +310,16 @@ class SupabaseSourceRepository(_Base):
             await s.commit()
         return src
 
+    async def delete(self, org_id: OrgId, source_id: SourceId) -> None:
+        async with self._sm() as s:
+            await s.execute(
+                delete(SourceORM).where(
+                    SourceORM.id == source_id,
+                    SourceORM.org_id == org_id,
+                ),
+            )
+            await s.commit()
+
 
 class SupabaseWorkflowRepository(_Base):
     async def add(self, w: Workflow) -> Workflow:
@@ -319,6 +349,16 @@ class SupabaseWorkflowRepository(_Base):
             await s.merge(_workflow_to_orm(w))
             await s.commit()
         return w
+
+    async def delete(self, org_id: OrgId, workflow_id: WorkflowId) -> None:
+        async with self._sm() as s:
+            await s.execute(
+                delete(WorkflowORM).where(
+                    WorkflowORM.id == workflow_id,
+                    WorkflowORM.org_id == org_id,
+                ),
+            )
+            await s.commit()
 
 
 class SupabaseWorkflowRunRepository(_Base):
@@ -383,6 +423,16 @@ class SupabasePostRepository(_Base):
             await s.merge(_post_to_orm(p))
             await s.commit()
         return p
+
+    async def delete(self, org_id: OrgId, post_id: PostId) -> None:
+        async with self._sm() as s:
+            await s.execute(
+                delete(PostORM).where(
+                    PostORM.id == post_id,
+                    PostORM.org_id == org_id,
+                ),
+            )
+            await s.commit()
 
 
 class SupabaseUserRepository(_Base):

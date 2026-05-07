@@ -21,6 +21,7 @@ class TumblrPlatform(SocialPlatform):
     capabilities = PlatformCapabilities(
         text_only=True, image=True, video=True, gif=True, document=False,
         threads=False, scheduling=True, analytics=False,
+        experimental=True,
     )
     max_text_length = 4096
     max_hashtags = 30
