@@ -115,7 +115,7 @@ export default function PlatformsPage() {
                       <div>
                         <CardTitle>
                           {g.display_name}
-                          {(plugins ?? []).find(p => p.name === g.plugin_name)?.capabilities?.experimental && (
+                          {Boolean(((plugins ?? []).find(p => p.name === g.plugin_name)?.capabilities as any)?.experimental) && (
                             <Badge tone="warning" className="ml-2 text-[10px]">preview</Badge>
                           )}
                         </CardTitle>
