@@ -1,0 +1,31 @@
+name: Deploy backend (Render)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - 'infra/render.yaml'
+      - '.github/workflows/deploy-backend.yml'
+  workflow_dispatch:
+
+jobs:
+  trigger-render:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Render deploy
+        # Render watches the repo and auto-deploys; this hook lets you also
+        # kick a deploy manually (useful for re-running after a secret rotation).
+        run: |
+          curl -fsSL -X POST \
+            -H "Accept: application/json" \
+            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+            "https://api.render.com/v1/services/${{ secrets.RENDER_API_SERVICE_ID }}/deploys"
+          curl -fsSL -X POST \
+            -H "Accept: application/json" \
+            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+            "https://api.render.com/v1/services/${{ secrets.RENDER_WORKER_SERVICE_ID }}/deploys"
+          curl -fsSL -X POST \
+            -H "Accept: application/json" \
+            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+            "https://api.render.com/v1/services/${{ secrets.RENDER_BEAT_SERVICE_ID }}/deploys"

@@ -1,0 +1,101 @@
+version: "3.9"
+
+x-backend-env: &backend-env
+  ENV: dev
+  PERSISTENCE_BACKEND: ${PERSISTENCE_BACKEND:-auto}
+  AUTH_BACKEND: ${AUTH_BACKEND:-auto}
+  DB_URL: postgresql+asyncpg://smms:smms@postgres:5432/smms
+  REDIS_URL: redis://redis:6379/0
+  QUEUE_BROKER_URL: amqp://guest:guest@rabbitmq:5672//
+  QUEUE_RESULT_BACKEND: redis://redis:6379/1
+  SEC_TOKEN_VAULT_MASTER_KEY: ${SEC_TOKEN_VAULT_MASTER_KEY:-dev-only-replace-me-32bytes-min!!}
+  OKTA_ISSUER: ${OKTA_ISSUER:-}
+  OKTA_AUDIENCE: ${OKTA_AUDIENCE:-api://smms}
+  OKTA_CLIENT_ID: ${OKTA_CLIENT_ID:-}
+  OKTA_CLIENT_SECRET: ${OKTA_CLIENT_SECRET:-}
+  SUPABASE_URL: ${SUPABASE_URL:-}
+  SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:-}
+  SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:-}
+  SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET:-}
+  SUPABASE_STORAGE_BUCKET: ${SUPABASE_STORAGE_BUCKET:-smms-media}
+  SUPABASE_POSTGRES_CONNECTION_STRING: ${SUPABASE_POSTGRES_CONNECTION_STRING:-}
+  LLM_DEFAULT_PROVIDER: ${LLM_DEFAULT_PROVIDER:-mock}
+  LLM_ANTHROPIC_API_KEY: ${LLM_ANTHROPIC_API_KEY:-}
+  LLM_OPENAI_API_KEY: ${LLM_OPENAI_API_KEY:-}
+  OBS_LOG_LEVEL: INFO
+  OBS_LOG_JSON: "true"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: smms
+      POSTGRES_PASSWORD: smms
+      POSTGRES_DB: smms
+    volumes: [pgdata:/var/lib/postgresql/data]
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U smms"]
+      interval: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    ports: ["5672:5672", "15672:15672"]
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio12345
+    ports: ["9000:9000", "9001:9001"]
+    volumes: [minio:/data]
+
+  backend:
+    build: ./backend
+    environment: *backend-env
+    depends_on:
+      postgres:  { condition: service_healthy }
+      redis:     { condition: service_started }
+      rabbitmq:  { condition: service_started }
+    ports: ["8000:8000"]
+
+  worker:
+    build: ./backend
+    command: ["celery", "-A", "app.infrastructure.queue.celery_app.celery_app",
+              "worker", "-Q", "workflows,publish", "-l", "info"]
+    environment: *backend-env
+    depends_on: [backend, rabbitmq, redis]
+
+  flower:
+    image: mher/flower:2
+    command: ["celery", "--broker=amqp://guest:guest@rabbitmq:5672//", "flower"]
+    environment:
+      CELERY_BROKER_URL: amqp://guest:guest@rabbitmq:5672//
+    ports: ["5555:5555"]
+    depends_on: [rabbitmq]
+
+  frontend:
+    build: ./frontend
+    environment:
+      BACKEND_URL: http://backend:8000
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-dev-secret-please-change}
+      OKTA_ISSUER: ${OKTA_ISSUER:-}
+      OKTA_CLIENT_ID: ${OKTA_CLIENT_ID:-}
+      OKTA_CLIENT_SECRET: ${OKTA_CLIENT_SECRET:-}
+      NEXT_PUBLIC_SUPABASE_URL: ${SUPABASE_URL:-}
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:-}
+      DEV_BEARER_TOKEN: ${DEV_BEARER_TOKEN:-dev.admin.dev@example.com.00000000-0000-0000-0000-000000000001}
+    depends_on: [backend]
+    ports: ["3000:3000"]
+
+volumes:
+  pgdata: {}
+  minio: {}

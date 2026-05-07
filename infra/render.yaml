@@ -1,0 +1,84 @@
+# Render.com Blueprint — one-shot deploy of backend API + worker + beat.
+# Usage: render blueprint launch (or push the repo and click "New Blueprint").
+services:
+  - type: web
+    name: smms-api
+    runtime: docker
+    rootDir: backend
+    plan: starter                       # bump to standard / pro for prod
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: ENV
+        value: prod
+      - key: PERSISTENCE_BACKEND
+        value: supabase
+      - key: AUTH_BACKEND
+        value: supabase
+      - key: SUPABASE_URL
+        sync: false                     # set in Render dashboard
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      - key: SUPABASE_POSTGRES_CONNECTION_STRING
+        sync: false
+      - key: SEC_TOKEN_VAULT_MASTER_KEY
+        generateValue: true             # Render auto-generates a 32-byte secret
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: smms-redis
+          property: connectionString
+      - key: QUEUE_BROKER_URL
+        fromService:
+          type: keyvalue
+          name: smms-redis
+          property: connectionString
+      - key: LLM_DEFAULT_PROVIDER
+        value: anthropic
+      - key: LLM_ANTHROPIC_API_KEY
+        sync: false
+      - key: OBS_LOG_JSON
+        value: "true"
+
+  - type: worker
+    name: smms-worker
+    runtime: docker
+    rootDir: backend
+    plan: starter
+    dockerCommand: celery -A app.infrastructure.queue.celery_app.celery_app worker -Q workflows,publish,publish_dlq -l info
+    envVars:
+      - fromGroup: smms-api-env
+
+  - type: worker
+    name: smms-beat
+    runtime: docker
+    rootDir: backend
+    plan: starter
+    dockerCommand: celery -A app.infrastructure.queue.celery_app.celery_app beat -l info
+    envVars:
+      - fromGroup: smms-api-env
+
+  - type: redis
+    name: smms-redis
+    plan: starter
+    ipAllowList: []                     # private to Render services
+    maxmemoryPolicy: allkeys-lru
+
+envVarGroups:
+  - name: smms-api-env
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_POSTGRES_CONNECTION_STRING
+        sync: false
+      - key: SEC_TOKEN_VAULT_MASTER_KEY
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: QUEUE_BROKER_URL
+        sync: false
+      - key: LLM_ANTHROPIC_API_KEY
+        sync: false

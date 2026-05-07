@@ -1,0 +1,143 @@
+from __future__ import annotations
+
+from uuid import UUID
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+
+from app.api.deps import current_user, get_workflow_service
+from app.core.security import Principal
+from app.domain.entities.workflow import WorkflowConfig
+from app.domain.value_objects.ids import OrgId, PlatformId, SourceId, WorkflowId
+from app.domain.value_objects.schedule import Schedule, ScheduleKind
+from app.domain.value_objects.targeting import TargetSelector
+from app.schemas.workflows import (
+    TargetSelectorIn,
+    WorkflowConfigIn,
+    WorkflowCreate,
+    WorkflowOut,
+    WorkflowRunOut,
+)
+from app.services.workflow_service import WorkflowService
+
+router = APIRouter()
+
+
+def _to_config(c: WorkflowConfigIn) -> WorkflowConfig:
+    return WorkflowConfig(
+        tone=c.tone, audience=c.audience, voice_guide=c.voice_guide,
+        max_revisions=c.max_revisions, quality_threshold=c.quality_threshold,
+        low_quality_threshold=c.low_quality_threshold,
+        require_human_approval=c.require_human_approval,
+        llm_provider=c.llm_provider, llm_model=c.llm_model, extra=c.extra,
+    )
+
+
+def _to_schedule(s) -> Schedule:
+    return Schedule(
+        kind=ScheduleKind(s.kind), cron=s.cron,
+        interval_minutes=s.interval_minutes, run_at=s.run_at, timezone=s.timezone,
+    )
+
+
+def _to_selector(s: TargetSelectorIn) -> TargetSelector:
+    return TargetSelector(
+        explicit_platform_ids=tuple(PlatformId(p) for p in s.explicit_platform_ids),
+        all_of_platforms=tuple(s.all_of_platforms),
+        by_handle=tuple(s.by_handle),
+        tagged=tuple(s.tagged),
+        exclude_platform_ids=tuple(PlatformId(p) for p in s.exclude_platform_ids),
+        exclude_plugins=tuple(s.exclude_plugins),
+    )
+
+
+def _selector_out(sel) -> TargetSelectorIn:
+    return TargetSelectorIn(
+        explicit_platform_ids=[UUID(str(p)) for p in sel.explicit_platform_ids],
+        all_of_platforms=list(sel.all_of_platforms),
+        by_handle=list(sel.by_handle),
+        tagged=list(sel.tagged),
+        exclude_platform_ids=[UUID(str(p)) for p in sel.exclude_platform_ids],
+        exclude_plugins=list(sel.exclude_plugins),
+    )
+
+
+@router.get("", response_model=list[WorkflowOut])
+async def list_workflows(
+    user: Principal = Depends(current_user),
+    svc: WorkflowService = Depends(get_workflow_service),
+) -> list[WorkflowOut]:
+    items = await svc.list(OrgId(UUID(user.org_id)))
+    return [_to_out(w) for w in items]
+
+
+@router.post("", response_model=WorkflowOut, status_code=status.HTTP_201_CREATED)
+async def create_workflow(
+    body: WorkflowCreate,
+    user: Principal = Depends(current_user),
+    svc: WorkflowService = Depends(get_workflow_service),
+) -> WorkflowOut:
+    if not user.role.can_edit():
+        raise HTTPException(status_code=403, detail="Editor role required")
+    wf = await svc.create(
+        org_id=OrgId(UUID(user.org_id)),
+        name=body.name,
+        description=body.description,
+        source_ids=[SourceId(s) for s in body.source_ids],
+        platform_ids=[PlatformId(p) for p in body.platform_ids],
+        config=_to_config(body.config),
+        schedule=_to_schedule(body.schedule),
+        target_selector=_to_selector(body.target_selector),
+    )
+    return _to_out(wf)
+
+
+@router.post("/{workflow_id}/activate", response_model=WorkflowOut)
+async def activate(
+    workflow_id: UUID,
+    user: Principal = Depends(current_user),
+    svc: WorkflowService = Depends(get_workflow_service),
+) -> WorkflowOut:
+    wf = await svc.activate(OrgId(UUID(user.org_id)), WorkflowId(workflow_id))
+    return _to_out(wf)
+
+
+@router.post("/{workflow_id}/run", response_model=WorkflowRunOut)
+async def run_now(
+    workflow_id: UUID,
+    background: BackgroundTasks,
+    user: Principal = Depends(current_user),
+    svc: WorkflowService = Depends(get_workflow_service),
+) -> WorkflowRunOut:
+    """Run the workflow inline (returns trace). For prod, dispatch via Celery."""
+    run = await svc.run(OrgId(UUID(user.org_id)), WorkflowId(workflow_id))
+    return WorkflowRunOut(
+        id=run.id, workflow_id=run.workflow_id, status=run.status.value,
+        revision_count=run.revision_count, started_at=run.started_at,
+        finished_at=run.finished_at, error=run.error,
+        trace=[{"agent": e.agent, "event": e.event, "ts": e.occurred_at.isoformat(),
+                **e.payload} for e in run.trace],
+    )
+
+
+def _to_out(wf) -> WorkflowOut:
+    return WorkflowOut(
+        id=wf.id, name=wf.name, description=wf.description,
+        status=wf.status.value,
+        source_ids=list(wf.source_ids), platform_ids=list(wf.platform_ids),
+        config=WorkflowConfigIn(
+            tone=wf.config.tone, audience=wf.config.audience,
+            voice_guide=wf.config.voice_guide, max_revisions=wf.config.max_revisions,
+            quality_threshold=wf.config.quality_threshold,
+            low_quality_threshold=wf.config.low_quality_threshold,
+            require_human_approval=wf.config.require_human_approval,
+            llm_provider=wf.config.llm_provider, llm_model=wf.config.llm_model,
+            extra=wf.config.extra,
+        ),
+        schedule={
+            "kind": wf.schedule.kind.value, "cron": wf.schedule.cron,
+            "interval_minutes": wf.schedule.interval_minutes,
+            "run_at": wf.schedule.run_at, "timezone": wf.schedule.timezone,
+        },
+        target_selector=_selector_out(wf.target_selector),
+        created_at=wf.created_at, updated_at=wf.updated_at,
+    )
