@@ -623,6 +623,31 @@ class WorkflowService:
             except Exception as exc:                                   # noqa: BLE001
                 log.warning("consumed_keys_lookup_failed", error=str(exc))
 
+        # Strategies that need an LLM (e.g. relevance via embeddings) get
+        # one wired up with the org's stored API key + budget guard. Built
+        # lazily so the freshness/per_item/roundrobin defaults don't pay
+        # the cost.
+        llm = None
+        if getattr(strategy, "needs_llm", False):
+            try:
+                api_key = await self._resolve_llm_api_key(org_id, wf.config.llm_provider)
+                from app.agents.factory import build_orchestrator
+                # build_orchestrator returns an Orchestrator with its `.llm`
+                # already wrapped in BudgetGuardedLLM — reuse the same
+                # plumbing rather than re-implementing it.
+                orchestrator_for_llm = build_orchestrator(
+                    wf, self.registry, api_key=api_key,
+                    org_id=org_id, usage_service=self.llm_usage,
+                    usage_context={
+                        "workflow_id": str(wf.id), "run_id": str(run.id),
+                        "trigger": "selection",
+                    },
+                )
+                llm = orchestrator_for_llm.executor.llm
+            except Exception as exc:                                   # noqa: BLE001
+                log.warning("selection_llm_init_failed",
+                            strategy=strategy_name, error=str(exc))
+
         ctx = SelectionContext(
             candidates=items,
             consumed_keys=consumed_keys,
@@ -630,6 +655,7 @@ class WorkflowService:
             target_platforms=target_plugins,
             directive=directive or None,
             org_id=org_id,
+            llm=llm,
         )
         try:
             result: SelectionResult = await strategy.select(ctx)

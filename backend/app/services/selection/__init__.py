@@ -2,3 +2,4 @@
 from . import freshness  # noqa: F401
 from . import per_item    # noqa: F401
 from . import roundrobin  # noqa: F401
+from . import relevance   # noqa: F401

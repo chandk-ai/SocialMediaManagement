@@ -3,7 +3,7 @@ from fastapi import APIRouter
 from . import (
     auth, platforms, sources, workflows, posts, plugins, health,
     triggers, reviews, webhooks, llm_keys, llm_usage, audit, team,
-    compliance, selection,
+    compliance, selection, source_items,
     campaigns, experiments, approvals, recycling,
     localization, hashtags, performance, privacy,
 )
@@ -25,6 +25,7 @@ api_router.include_router(audit.router, tags=["audit"])
 api_router.include_router(team.router, tags=["team"])
 api_router.include_router(compliance.router, tags=["compliance"])
 api_router.include_router(selection.router, tags=["selection"])
+api_router.include_router(source_items.router, tags=["source-items"])
 
 # Advanced feature routers
 api_router.include_router(campaigns.router, prefix="/campaigns", tags=["campaigns"])

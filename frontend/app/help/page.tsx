@@ -190,6 +190,14 @@ function H2({ children, id }: { children: React.ReactNode; id?: string }) {
   );
 }
 
+function H3({ children, id }: { children: React.ReactNode; id?: string }) {
+  return (
+    <h3 id={id} className="text-sm font-semibold text-ink-800 mt-6 mb-2 scroll-mt-20">
+      {children}
+    </h3>
+  );
+}
+
 function P({ children }: { children: React.ReactNode }) {
   return <p className="text-sm text-ink-700 leading-relaxed mb-3">{children}</p>;
 }
@@ -571,14 +579,46 @@ function BuildingWorkflows() {
           ones. Configurable: synthesize all chosen items, or fan out to
           one post per item.
         </li>
+        <li>
+          <strong>Relevance</strong> — embedding-based ranking against the
+          run's directive (the free-text instruction from a chat trigger
+          like "post about today's launch"). Picks the top-K most
+          semantically similar unseen items. Uses your configured LLM
+          provider for embeddings — budget-guarded, per-tenant. Falls back
+          to newest-first when no directive is given or the provider doesn't
+          support embeddings.
+        </li>
       </Bullets>
       <P>
         <strong>De-dup is automatic.</strong> Every (source, external-id)
         pair the system has consumed lives in <code>smms.source_items</code>.
         A workflow running daily on the same RSS feed will never re-publish
-        yesterday's article. To re-use an item, an admin can reset its
-        status via API or DB.
+        yesterday's article. To re-use an item, open the source's "Items"
+        view and click <em>Reset</em> on the row.
       </P>
+      <H3 id="wf-source-items">Inspecting + resetting consumption history</H3>
+      <P>
+        Each source has an <strong>Items</strong> button on the Sources
+        page that opens its consumption history. You'll see every item the
+        system has fetched, its status (new / consumed / skipped), when it
+        was last seen, when it was consumed, and which Post it produced.
+        Filter by status, search by title / external_id / tag, and:
+      </P>
+      <Bullets>
+        <li>
+          <strong>Tag</strong> — apply user labels (<code>ready</code>,{' '}
+          <code>hold</code>, <code>pinned</code>, anything you want). Lower-
+          cased + deduplicated server-side. Future custom strategies can
+          act on these.
+        </li>
+        <li>
+          <strong>Reset</strong> (admin-only) — flip a consumed/skipped
+          item back to <code>new</code> so the next run re-processes it.
+          The original Post is left intact — only the consumption status
+          changes. Useful for "we accidentally consumed today's item",
+          "the upstream typo got fixed, run it again", or QA loops.
+        </li>
+      </Bullets>
       <P>
         Selection runs in its own pipeline step (<code>RunStatus.SELECTING</code>)
         between Planning and Executing. Open a run's trace and you'll see

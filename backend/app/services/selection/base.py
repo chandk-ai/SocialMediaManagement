@@ -23,6 +23,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
+from app.adapters.llm.base import LLMProvider
 from app.domain.entities.source import SourceItem
 from app.domain.entities.workflow import WorkflowConfig
 from app.domain.value_objects.ids import OrgId
@@ -55,6 +56,11 @@ class SelectionContext:
     target_platforms: list[str]
     directive: str | None
     org_id: OrgId
+    # Optional LLM provider — set by the orchestrator with the workflow's
+    # configured provider (already keyed + budget-guarded). Strategies that
+    # need embeddings (relevance, semantic-rerank) call ``ctx.llm.embed()``;
+    # strategies that don't (freshness, per_item, roundrobin) ignore it.
+    llm: LLMProvider | None = None
 
 
 class SelectionStrategy(ABC):
@@ -69,6 +75,13 @@ class SelectionStrategy(ABC):
     # JSON Schema describing the per-workflow ``selection_config`` shape —
     # drives the wizard's strategy-config form (same pattern as Sources).
     config_schema: ClassVar[dict[str, Any]] = {"type": "object", "properties": {}}
+
+    # When True, the orchestrator instantiates the workflow's configured
+    # LLM (with org-stored API key + budget guard) and attaches it to the
+    # SelectionContext as ``ctx.llm``. Strategies that don't need an LLM
+    # (freshness, per_item, roundrobin) leave this False so the
+    # orchestrator skips the cost of building one.
+    needs_llm: ClassVar[bool] = False
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         self.config = config or {}

@@ -489,6 +489,9 @@ function SourceTile({ source, pluginInfo, onEdit }: {
         <Button size="sm" variant="outline" onClick={runPreview} disabled={busy !== null}>
           <Eye size={12} /> {busy === 'preview' ? 'Loading…' : 'Preview'}
         </Button>
+        <a href={`/sources/${source.id}/items`} className="btn btn-outline" style={{padding: '0.375rem 0.75rem', fontSize: '0.75rem'}}>
+          <Eye size={12} /> Items
+        </a>
         <Button size="sm" variant="outline" onClick={onEdit} disabled={busy !== null}>
           <Edit3 size={12} /> Edit
         </Button>
