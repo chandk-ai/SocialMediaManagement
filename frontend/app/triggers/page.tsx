@@ -8,9 +8,10 @@ import { Sidebar } from '@/components/layout/Sidebar';
 import { TopBar } from '@/components/layout/TopBar';
 import { useApi, api } from '@/lib/api/client';
 import type { PluginInfo, Trigger, Workflow } from '@/lib/api/types';
-import { Zap, Plus, Webhook, MessageSquare, CalendarClock, MousePointerClick, Send } from 'lucide-react';
+import { Zap, Plus, Webhook, MessageSquare, CalendarClock, MousePointerClick, Send, Sparkles } from 'lucide-react';
 import { useState } from 'react';
 import { mutate } from 'swr';
+import { TelegramSetup } from '@/components/triggers/TelegramSetup';
 
 const ICONS: Record<string, any> = {
   manual: MousePointerClick,
@@ -21,12 +22,29 @@ const ICONS: Record<string, any> = {
   telegram: Send,
 };
 
+// Promote Telegram first — it's the recommended chat trigger for this product
+// (3-min @BotFather setup vs WhatsApp's days-long Meta verification). Manual
+// and schedule come next so the basic loop is one click away. WhatsApp /
+// Instagram drop to the bottom: real but heavier setup.
+const PLUGIN_PRIORITY: Record<string, number> = {
+  telegram: 0, manual: 1, schedule: 2, webhook: 3, slack: 4,
+  whatsapp: 5, instagram: 6,
+};
+function sortPlugins(plugins: PluginInfo[]): PluginInfo[] {
+  return [...plugins].sort((a, b) => {
+    const ap = PLUGIN_PRIORITY[a.name] ?? 99;
+    const bp = PLUGIN_PRIORITY[b.name] ?? 99;
+    return ap - bp || a.display_name.localeCompare(b.display_name);
+  });
+}
+
 export default function TriggersPage() {
   const { data: triggers } = useApi<Trigger[]>('/triggers');
   const { data: plugins } = useApi<PluginInfo[]>('/plugins?kind=trigger');
   const { data: reviewPlugins } = useApi<PluginInfo[]>('/plugins?kind=review_channel');
   const { data: workflows } = useApi<Workflow[]>('/workflows');
   const [adding, setAdding] = useState<PluginInfo | null>(null);
+  const [addingTelegram, setAddingTelegram] = useState(false);
 
   return (
     <div className="flex h-screen">
@@ -85,16 +103,25 @@ export default function TriggersPage() {
           <section>
             <h2 className="text-sm font-semibold text-ink-700 mb-3">Add a trigger</h2>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {(plugins ?? []).map(p => {
+              {sortPlugins(plugins ?? []).map(p => {
                 const Icon = ICONS[p.name] ?? Zap;
+                const isTelegram = p.name === 'telegram';
                 return (
-                  <Card key={p.name}>
+                  <Card key={p.name} className={isTelegram ? 'border-accent' : ''}>
                     <CardTitle className="flex items-center gap-2">
                       <Icon size={14} /> {p.display_name}
+                      {isTelegram && (
+                        <span className="ml-auto inline-flex items-center gap-1 text-[10px] uppercase tracking-wide text-accent font-medium">
+                          <Sparkles size={10} /> recommended
+                        </span>
+                      )}
                     </CardTitle>
                     <CardDescription>{p.description}</CardDescription>
                     <div className="mt-4">
-                      <Button size="sm" onClick={() => setAdding(p)}>
+                      <Button
+                        size="sm"
+                        onClick={() => isTelegram ? setAddingTelegram(true) : setAdding(p)}
+                      >
                         <Plus size={14} /> Configure
                       </Button>
                     </div>
@@ -115,6 +142,16 @@ export default function TriggersPage() {
               setAdding(null);
               await mutate('/triggers');
             }}
+          />
+        )}
+        {addingTelegram && (
+          <TelegramSetup
+            workflows={workflows ?? []}
+            reviewChannelOptions={(reviewPlugins ?? []).map(r => ({
+              name: r.name, display_name: r.display_name,
+            }))}
+            onClose={() => setAddingTelegram(false)}
+            onCreated={async () => { await mutate('/triggers'); }}
           />
         )}
       </div>

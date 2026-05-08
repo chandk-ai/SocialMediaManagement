@@ -27,12 +27,26 @@ class TelegramReviewChannel(ReviewChannel):
     config_schema = {
         "type": "object",
         "properties": {
-            "bot_token_env": {"type": "string", "default": "TELEGRAM_BOT_TOKEN"},
+            "bot_token":     {"type": "string",
+                              "title": "Bot token (from @BotFather)",
+                              "x-secret": True},
+            "bot_token_env": {"type": "string",
+                              "default": "TELEGRAM_BOT_TOKEN",
+                              "title": "Fallback env var if bot_token isn't set inline"},
         },
     }
 
+    def _resolve_token(self) -> str:
+        """Per-trigger config wins so SaaS tenants can each have their own
+        bot. Falls back to the named env var for self-hosted single-bot
+        deployments."""
+        inline = (self.config.get("bot_token") or "").strip()
+        if inline:
+            return inline
+        return os.getenv(self.config.get("bot_token_env", "TELEGRAM_BOT_TOKEN"), "")
+
     async def send_for_review(self, recipient: str, message: ReviewMessage) -> str:
-        token = os.getenv(self.config.get("bot_token_env", "TELEGRAM_BOT_TOKEN"), "")
+        token = self._resolve_token()
         body = self._build_body(recipient, message)
         if not token:
             log.info("telegram_review_dry_run",
@@ -51,7 +65,7 @@ class TelegramReviewChannel(ReviewChannel):
             return f"failed:{recipient}"
 
     async def acknowledge(self, recipient: str, text: str) -> None:
-        token = os.getenv(self.config.get("bot_token_env", "TELEGRAM_BOT_TOKEN"), "")
+        token = self._resolve_token()
         if not token:
             log.info("telegram_ack_dry_run", recipient=recipient, text=text)
             return

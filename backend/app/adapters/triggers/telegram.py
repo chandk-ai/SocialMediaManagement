@@ -37,8 +37,11 @@ class TelegramTrigger(TriggerAdapter):
     config_schema = {
         "type": "object",
         "properties": {
+            "bot_token":     {"type": "string",
+                              "title": "Bot token (from @BotFather)",
+                              "x-secret": True},
             "bot_token_env": {"type": "string", "default": "TELEGRAM_BOT_TOKEN",
-                              "title": "Env var holding the bot token"},
+                              "title": "Fallback env var if bot_token isn't set inline"},
             "secret_token":  {"type": "string",
                               "title": "Secret token (set when calling setWebhook)"},
             "allowed_chat_ids": {"type": "array", "items": {"type": "string"},
