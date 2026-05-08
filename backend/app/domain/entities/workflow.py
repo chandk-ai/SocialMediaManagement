@@ -32,6 +32,11 @@ class WorkflowConfig:
     # past posts for the same platform and adds them to the prompt.
     use_brand_voice: bool = False
     brand_voice_top_k: int = 5
+    # Compliance profile (Niche #4) — scans every draft against per-industry
+    # rules (FINRA / HIPAA / FDA / crypto-claims). Violations populate the
+    # EvaluationReport `flags`, which the Critique agent already treats as
+    # an automatic escalate-to-human. ``None`` = no compliance scan.
+    compliance_profile: str | None = None
     extra: dict = field(default_factory=dict)
 
 

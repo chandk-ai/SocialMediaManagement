@@ -7,6 +7,7 @@ import re
 
 from app.adapters.llm.base import LLMRequest
 from app.domain.value_objects.content import EvaluationReport
+from app.services.compliance import scan_drafts
 
 from .base import Agent, AgentState
 
@@ -63,12 +64,51 @@ class EvaluatorAgent(Agent):
             )
 
         evals = await asyncio.gather(*(_score_one(d) for d in state.drafts))
+
+        # Compliance scan (Niche #4) — per-industry rule pack runs against
+        # every draft's text and merges its violations into the matching
+        # EvaluationReport.flags. Critique already treats any flag as an
+        # automatic escalate-to-human, so a violation pauses publish for
+        # a reviewer with the specific rule that fired in the message.
+        # No-op when workflow_config.compliance_profile is None / "none".
+        compliance_violations = scan_drafts(
+            state.workflow_config.compliance_profile,
+            ((d.platform_name, d.text) for d in state.drafts),
+        )
+        if compliance_violations:
+            evals = [
+                _merge_flags(e, compliance_violations.get(d.platform_name, []))
+                for d, e in zip(state.drafts, evals, strict=False)
+            ]
+            state.log(
+                self.name, "compliance_violations",
+                profile=state.workflow_config.compliance_profile,
+                affected=list(compliance_violations.keys()),
+                total=sum(len(v) for v in compliance_violations.values()),
+            )
+
         state.log(
             self.name, "scored",
             avg=sum(e.overall for e in evals) / len(evals),
             min=min(e.overall for e in evals),
         )
         return state.merge(evaluations=list(evals))
+
+
+def _merge_flags(report: EvaluationReport, extra_flags: list[str]) -> EvaluationReport:
+    """Return a new EvaluationReport with the new flags appended (deduped)."""
+    if not extra_flags:
+        return report
+    merged = list({*list(report.flags), *extra_flags})
+    return EvaluationReport.from_scores(
+        {
+            "clarity": report.clarity, "brand_voice": report.brand_voice,
+            "compliance": report.compliance, "platform_fit": report.platform_fit,
+            "predicted_engagement": report.predicted_engagement,
+        },
+        suggestions=list(report.suggestions),
+        flags=merged,
+    )
 
 
 def _parse_scores(raw: str) -> dict:

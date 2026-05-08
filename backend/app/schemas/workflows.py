@@ -18,6 +18,11 @@ class WorkflowConfigIn(APIModel):
     require_human_approval: bool = False
     llm_provider: str = "anthropic"
     llm_model: str = "claude-sonnet-4-6"
+    use_brand_voice: bool = False
+    brand_voice_top_k: int = 5
+    # Niche #4 — compliance profile name (finra / hipaa / fda / crypto / gdpr).
+    # None or "none" disables the scan.
+    compliance_profile: str | None = None
     extra: dict = Field(default_factory=dict)
 
 

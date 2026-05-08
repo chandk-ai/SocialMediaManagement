@@ -68,6 +68,10 @@ function Wizard() {
     preferred_model: string | null;
     providers: Array<{ provider: string; is_set: boolean }>;
   }>('/llm-keys');
+  const { data: complianceCatalog } = useApi<{
+    profiles: { name: string; label: string; description: string;
+                docs_url: string | null; rule_count: number }[];
+  }>('/compliance/profiles');
 
   const [step, setStep] = useState<StepKey>(initialTemplate ? 'sources' : 'template');
   const [template, setTemplate] = useState<WorkflowTemplate | null>(
@@ -83,6 +87,8 @@ function Wizard() {
   const [audience, setAudience] = useState('general');
   const [requireApproval, setRequireApproval] = useState(true);
   const [llm, setLlm] = useState('mock');
+  const [llmModel, setLlmModel] = useState<string>('');           // '' → backend's per-provider default
+  const [complianceProfile, setComplianceProfile] = useState<string>('');     // '' = no scan
   const [scheduleKind, setScheduleKind] = useState<'manual' | 'cron' | 'interval' | 'once'>('manual');
   const [cron, setCron] = useState('');
   const [intervalMinutes, setIntervalMinutes] = useState('');
@@ -108,11 +114,18 @@ function Wizard() {
   }, [template]);
 
   // Default the LLM provider to the org's preferred one (set in Settings).
+  // Seed both provider AND model from the org's preference. Without
+  // seeding the model, the workflow ends up with provider=openai but
+  // model=claude-sonnet-4-6 (the dataclass default), which fails at run
+  // time. The user can still override either via the wizard.
   useEffect(() => {
     if (llmKeys?.preferred_provider) {
       setLlm(llmKeys.preferred_provider);
     }
-  }, [llmKeys?.preferred_provider]);
+    if (llmKeys?.preferred_model) {
+      setLlmModel(llmKeys.preferred_model);
+    }
+  }, [llmKeys?.preferred_provider, llmKeys?.preferred_model]);
 
   function toggle(arr: string[], setArr: (v: string[]) => void, id: string) {
     setArr(arr.includes(id) ? arr.filter(x => x !== id) : [...arr, id]);
@@ -183,6 +196,12 @@ function Wizard() {
           tone, audience,
           require_human_approval: requireApproval,
           llm_provider: llm,
+          // Send the model too so a non-default provider doesn't end up
+          // with a Claude-only model name. Empty string means "let the
+          // backend pick the per-provider default" (handled in
+          // WorkflowConfigIn — only the dataclass default kicks in then).
+          llm_model: llmModel || undefined,
+          compliance_profile: complianceProfile || null,
         },
         schedule: {
           kind: scheduleKind,
@@ -255,6 +274,9 @@ function Wizard() {
                 intervalMinutes={intervalMinutes} setIntervalMinutes={setIntervalMinutes}
                 runAt={runAt} setRunAt={setRunAt}
                 timezone={timezone} setTimezone={setTimezone}
+                complianceProfile={complianceProfile}
+                setComplianceProfile={setComplianceProfile}
+                complianceCatalog={complianceCatalog?.profiles ?? []}
               />
             )}
             {step === 'review' && (
@@ -531,6 +553,7 @@ function StepVoice(props: any) {
     intervalMinutes, setIntervalMinutes,
     runAt, setRunAt,
     timezone, setTimezone,
+    complianceProfile, setComplianceProfile, complianceCatalog,
   } = props;
   return (
     <Card>
@@ -575,6 +598,36 @@ function StepVoice(props: any) {
           </label>
         </div>
 
+        <div className="md:col-span-2">
+          <label className="block text-xs text-ink-500 mb-1">
+            Compliance profile <span className="text-ink-400">(regulated industries — optional)</span>
+          </label>
+          <select
+            className="input"
+            value={complianceProfile}
+            onChange={(e: any) => setComplianceProfile(e.target.value)}
+          >
+            <option value="">No compliance scan</option>
+            {(complianceCatalog ?? []).map((p: any) => (
+              <option key={p.name} value={p.name}>
+                {p.label} ({p.rule_count} rule{p.rule_count === 1 ? '' : 's'})
+              </option>
+            ))}
+          </select>
+          {complianceProfile && (
+            <p className="text-[11px] text-ink-500 mt-1">
+              Drafts that violate the profile rules will be paused for human
+              review with the specific rule that fired in the message.
+              {(() => {
+                const p = (complianceCatalog ?? []).find((x: any) => x.name === complianceProfile);
+                return p?.docs_url ? (
+                  <> · <a href={p.docs_url} target="_blank" rel="noreferrer" className="underline">docs</a></>
+                ) : null;
+              })()}
+            </p>
+          )}
+        </div>
+
         <div className="md:col-span-2 border-t border-ink-100 pt-4 mt-2">
           <h3 className="text-xs font-semibold text-ink-700 mb-3">Schedule</h3>
         </div>
@@ -585,7 +638,16 @@ function StepVoice(props: any) {
             <option value="cron">Cron expression</option>
             <option value="interval">Every N minutes</option>
             <option value="once">Once at a specific time</option>
+            <option value="adaptive">Adaptive — engagement-driven cadence</option>
           </select>
+          {scheduleKind === 'adaptive' && (
+            <p className="text-[11px] text-ink-500 mt-1">
+              The system watches recent engagement and adjusts cadence
+              automatically. Posts more often when engagement is rising,
+              backs off when audience fatigue shows up. Bounded between
+              every 2h and every 7d.
+            </p>
+          )}
         </div>
         <div>
           <label className="block text-xs text-ink-500 mb-1">Timezone</label>

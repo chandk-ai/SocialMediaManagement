@@ -30,7 +30,7 @@ import { Input } from '@/components/ui/Input';
 import {
   Sparkles, Plug, Database, Workflow, MessageSquare, Brain, Calendar,
   BarChart3, Zap, AlertCircle, HelpCircle, BookOpen, Search, ChevronRight,
-  CheckCircle2, ExternalLink, Info,
+  CheckCircle2, ExternalLink, Info, ShieldCheck, Activity, FlaskConical,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -53,6 +53,9 @@ const TOPICS: Topic[] = [
   { id: 'calendar',            title: 'Calendar & scheduling',    icon: Calendar,       group: 'using' },
   { id: 'analytics',           title: 'Analytics',                icon: BarChart3,      group: 'using' },
   { id: 'triggers',            title: 'Chat triggers',            icon: Zap,            group: 'using' },
+  { id: 'compliance',          title: 'Compliance scanning',      icon: ShieldCheck,    group: 'using' },
+  { id: 'experiments',         title: 'A/B experiments',          icon: FlaskConical,   group: 'using' },
+  { id: 'adaptive-schedule',   title: 'Adaptive scheduling',      icon: Activity,       group: 'using' },
 
   { id: 'troubleshooting',     title: 'Troubleshooting',          icon: AlertCircle,    group: 'help' },
   { id: 'faq',                 title: 'FAQ',                      icon: HelpCircle,     group: 'help' },
@@ -160,6 +163,9 @@ export default function HelpPage() {
             {active === 'calendar'             && <CalendarHelp />}
             {active === 'analytics'            && <AnalyticsHelp />}
             {active === 'triggers'             && <TriggersHelp />}
+            {active === 'compliance'           && <ComplianceHelp />}
+            {active === 'experiments'          && <ExperimentsHelp />}
+            {active === 'adaptive-schedule'    && <AdaptiveScheduleHelp />}
             {active === 'troubleshooting'      && <Troubleshooting />}
             {active === 'faq'                  && <Faq />}
             {active === 'glossary'             && <Glossary />}
@@ -714,6 +720,165 @@ function TriggersHelp() {
         <li><em>"Post about food drive today at 6pm to all accounts tagged 'community'"</em> — target by tag.</li>
         <li><em>"Schedule for tomorrow 9am: Q4 launch announcement"</em> — defer with directive.</li>
       </Bullets>
+    </>
+  );
+}
+
+/* ───────── Section: Compliance ──────────────────────────────────────── */
+function ComplianceHelp() {
+  return (
+    <>
+      <H1>Compliance scanning</H1>
+      <Lead>
+        Each workflow can be tagged with a compliance profile that scans every
+        draft for forbidden language patterns BEFORE it can publish. Violations
+        pause the post for human review with the specific rule that fired in
+        the message.
+      </Lead>
+
+      <H2 id="comp-when">When to use it</H2>
+      <P>
+        Turn on a profile when posts could trigger regulator attention or get
+        the company's social account suspended. The profiles below are designed
+        to catch the obvious mistakes — they're not a substitute for legal
+        review, but they catch the things junior team members commonly miss.
+      </P>
+
+      <H2 id="comp-profiles">Built-in profiles</H2>
+      <Bullets>
+        <li>
+          <strong>FINRA / RIA</strong> — broker-dealer + registered investment
+          advisor marketing. Blocks unqualified return promises, performance
+          guarantees, and posts about returns/performance that lack the
+          required disclaimer.
+        </li>
+        <li>
+          <strong>HIPAA / healthcare</strong> — blocks Protected Health
+          Information patterns (MRN, SSN, DOB) and unqualified disease-cure
+          claims.
+        </li>
+        <li>
+          <strong>FDA / pharma + supplements</strong> — blocks off-label use
+          mentions, "miracle" framing, and unqualified efficacy claims; requires
+          the standard "consult your doctor" or "these statements have not
+          been evaluated" disclaimer.
+        </li>
+        <li>
+          <strong>Crypto / digital-asset</strong> — blocks "guaranteed",
+          "10×/100×/moon", "risk-free"; requires "not financial advice" / "DYOR".
+        </li>
+        <li>
+          <strong>GDPR / privacy hygiene</strong> — flags accidental email and
+          phone-number leaks in marketing copy.
+        </li>
+      </Bullets>
+
+      <H2 id="comp-where">Where to set it</H2>
+      <P>
+        New workflow → step 4 (Voice &amp; schedule) → "Compliance profile"
+        dropdown. Existing workflows can be edited via the same picker.
+      </P>
+
+      <H2 id="comp-howitworks">How a violation flows</H2>
+      <Bullets>
+        <li>Executor produces a draft as usual.</li>
+        <li>Evaluator scores it, then runs the compliance scanner.</li>
+        <li>Any violation appends to the draft's <code>flags</code> list.</li>
+        <li>Critique sees the flag and forces ESCALATE — the run pauses for human review with the specific rule message.</li>
+        <li>If the reviewer revises the text and re-runs, the scanner runs again on the new text.</li>
+      </Bullets>
+
+      <H2 id="comp-extending">Extending</H2>
+      <P>
+        Profiles are pure data (regex blacklist + required-presence patterns)
+        in <code>app/services/compliance.py</code>. Adding an industry or
+        tightening an existing one is a one-file change with no migration.
+      </P>
+    </>
+  );
+}
+
+/* ───────── Section: Experiments ─────────────────────────────────────── */
+function ExperimentsHelp() {
+  return (
+    <>
+      <H1>A/B experiments</H1>
+      <Lead>
+        Test multiple variants of a post against each other and let the system
+        promote the winner's tone into your brand voice automatically. Self-
+        improving content over time.
+      </Lead>
+
+      <H2 id="exp-flow">The flow</H2>
+      <Bullets>
+        <li>Generate <code>n</code> variants — typically the LLM is prompted with different style hints (formal / playful / question-led / story-led).</li>
+        <li>Each variant is published as its own Post on the same target account.</li>
+        <li>After the settling window (default 24h), the metrics-collector worker pulls engagement numbers for each variant.</li>
+        <li>The system picks the variant with the highest <code>engagement_rate</code> as the winner.</li>
+        <li><strong>Auto-winner promotion</strong>: the winning variant's text is fed into the brand-voice corpus, so future Executor calls bias toward that style.</li>
+      </Bullets>
+
+      <H2 id="exp-allocation">Allocation modes</H2>
+      <Bullets>
+        <li><strong>Equal</strong> — 50/50 (or 1/n).</li>
+        <li><strong>Holdout</strong> — first variant is "control" (10%), rest split the remaining 90%.</li>
+        <li><strong>Bandit</strong> — initial weights equal; future tick adapts toward the winner. (Bandit logic is initial-weights-only today; real reinforcement learning is queued.)</li>
+      </Bullets>
+
+      <H2 id="exp-self-improving">Why this matters</H2>
+      <P>
+        Most SMM tools have A/B but don't feed the winner back into a
+        generative pipeline. Here, the brand-voice corpus that the Executor
+        retrieves from grows smarter with every concluded experiment. After a
+        few months you stop hand-prompting "more energetic" — the corpus
+        already biases that way because that's what worked.
+      </P>
+    </>
+  );
+}
+
+/* ───────── Section: Adaptive scheduling ─────────────────────────────── */
+function AdaptiveScheduleHelp() {
+  return (
+    <>
+      <H1>Adaptive scheduling</H1>
+      <Lead>
+        You don't pick a cadence — the system does. Posts more often when
+        engagement is rising, backs off when audience fatigue shows up.
+      </Lead>
+
+      <H2 id="adapt-when">When to use it</H2>
+      <P>
+        Pick this in the workflow wizard's Schedule step when you're not sure
+        what cadence works for an audience yet. Especially useful for a
+        brand-new account where the "right" frequency isn't known.
+      </P>
+
+      <H2 id="adapt-howitworks">How the cadence is computed</H2>
+      <Bullets>
+        <li>Look at the workflow's most recent published posts for the same target account.</li>
+        <li>Compare the median engagement of the latest 4 posts vs the 4 before that.</li>
+        <li>If engagement is up by 50%+ → halve the interval (post more).</li>
+        <li>If engagement is up 10–50% → 25% tighter.</li>
+        <li>If engagement is flat (±10%) → keep the interval.</li>
+        <li>If engagement is down 10–50% → 50% looser.</li>
+        <li>If engagement is down 50%+ → 2× looser (audience fatigue protection).</li>
+      </Bullets>
+
+      <H2 id="adapt-bounds">Bounds + cold-start</H2>
+      <P>
+        Never tighter than 1 post / 2h, never looser than 1 post / 7d. Until
+        the workflow has at least 8 published posts, the adaptive scheduler
+        falls back to the configured <code>interval_minutes</code> (or 24h
+        default).
+      </P>
+
+      <H2 id="adapt-trace">Where to see what it decided</H2>
+      <P>
+        Every adaptive decision (interval + reasoning) lands in the workflow
+        run's trace and the structured logs. Open a run in the dashboard and
+        you'll see entries like <code>engagement up +37% — slight tighten</code>.
+      </P>
     </>
   );
 }

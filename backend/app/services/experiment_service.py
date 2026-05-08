@@ -51,11 +51,16 @@ class ExperimentService:
         post_repo: PostRepository,
         platform_repo: PlatformRepository,
         registry: PluginRegistry,
+        brand_voice_service: object | None = None,
     ) -> None:
         self.repo = repo
         self.post_repo = post_repo
         self.platform_repo = platform_repo
         self.registry = registry
+        # Optional dep — injected by the deps factory when a real LLM/embed
+        # provider is available. None on memory backend / dev; the auto-
+        # winner-promotion hook becomes a no-op in that case.
+        self.brand_voice = brand_voice_service
 
     # ── CRUD ──────────────────────────────────────────────────────────
     async def create(
@@ -190,8 +195,10 @@ class ExperimentService:
         e = await self.get(org_id, experiment_id)
         if not e.is_settling_complete(now or datetime.utcnow()):
             return e
-        e.settle()
-        return await self.repo.update(e)
+        winner = e.settle()
+        await self.repo.update(e)
+        await self._promote_winner(e, winner)
+        return e
 
     async def settle_all_running(self) -> list[ExperimentId]:
         """Used by a periodic worker — settle every running experiment whose
@@ -199,10 +206,50 @@ class ExperimentService:
         settled: list[ExperimentId] = []
         for e in await self.repo.list_running():
             if e.is_settling_complete(datetime.utcnow()):
-                e.settle()
+                winner = e.settle()
                 await self.repo.update(e)
+                await self._promote_winner(e, winner)
                 settled.append(e.id)
         return settled
+
+    # ── Niche #7: auto-winner promotion ────────────────────────────────
+    async def _promote_winner(self, experiment: Experiment, winner) -> None:
+        """When an experiment settles with a clear winner, fold the winning
+        variant's text into the org's brand-voice corpus so the Executor
+        agent biases future drafts towards that style.
+
+        This is the "self-improving" loop: an experiment that beat its
+        peers becomes a high-engagement reference for everything that
+        follows on the same platform. No-op when the brand-voice service
+        isn't wired up (memory backend / no LLM provider).
+        """
+        if winner is None or self.brand_voice is None:
+            return
+        if winner.post_id is None:
+            return
+        try:
+            post = await self.post_repo.get(experiment.org_id, winner.post_id)
+            if post is None or post.status is not PostStatus.PUBLISHED:
+                return
+            platform = await self.platform_repo.get(experiment.org_id, experiment.platform_id)
+            plugin_name = platform.plugin_name if platform else None
+            await self.brand_voice.ingest_post(
+                experiment.org_id, post, plugin_name=plugin_name,
+            )
+            log.info(
+                "experiment_winner_promoted_to_brand_voice",
+                experiment_id=str(experiment.id),
+                variant=winner.label,
+                plugin=plugin_name,
+                metric=experiment.metric,
+                metric_value=winner.metric_value,
+            )
+        except Exception as exc:                                        # noqa: BLE001
+            # Promotion is best-effort — never break the settle path.
+            log.warning(
+                "experiment_winner_promotion_failed",
+                experiment_id=str(experiment.id), error=str(exc),
+            )
 
 
 # ── helpers ────────────────────────────────────────────────────────────────

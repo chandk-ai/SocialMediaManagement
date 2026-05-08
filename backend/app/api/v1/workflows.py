@@ -25,13 +25,39 @@ router = APIRouter()
 
 
 def _to_config(c: WorkflowConfigIn) -> WorkflowConfig:
+    # If the caller picked a provider but didn't supply a model, fall back
+    # to that provider's plugin-declared `default_model` rather than the
+    # WorkflowConfig dataclass default (which is Claude-specific). Without
+    # this, a workflow with provider=openai would silently inherit
+    # model=claude-sonnet-4-6 and crash at run time.
+    model = c.llm_model
+    if c.llm_provider and not model:
+        model = _provider_default_model(c.llm_provider) or "claude-sonnet-4-6"
     return WorkflowConfig(
         tone=c.tone, audience=c.audience, voice_guide=c.voice_guide,
         max_revisions=c.max_revisions, quality_threshold=c.quality_threshold,
         low_quality_threshold=c.low_quality_threshold,
         require_human_approval=c.require_human_approval,
-        llm_provider=c.llm_provider, llm_model=c.llm_model, extra=c.extra,
+        llm_provider=c.llm_provider, llm_model=model,
+        use_brand_voice=c.use_brand_voice, brand_voice_top_k=c.brand_voice_top_k,
+        compliance_profile=(
+            c.compliance_profile if (c.compliance_profile or "").lower() not in ("", "none")
+            else None
+        ),
+        extra=c.extra,
     )
+
+
+def _provider_default_model(provider: str) -> str | None:
+    """Lookup the LLM plugin's class-level ``default_model`` so a workflow
+    that specified a provider but no model gets a sensible per-provider
+    default (e.g. openai → gpt-4o, gemini → gemini-1.5-pro)."""
+    try:
+        from app.plugins.registry import PluginKind, get_global_registry
+        entry = get_global_registry().get(PluginKind.LLM, provider)
+        return getattr(entry.cls, "default_model", None) or None
+    except Exception:                                                   # noqa: BLE001
+        return None
 
 
 def _to_schedule(s) -> Schedule:

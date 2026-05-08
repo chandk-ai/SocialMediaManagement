@@ -114,6 +114,8 @@ def _is_due(wf: Workflow, now: datetime) -> bool:
     if s.kind.value == "optimal":
         # The optimal scheduler is consulted lazily; if no slot is set we skip.
         return _optimal_due(wf, now)
+    if s.kind.value == "adaptive":
+        return _adaptive_due(wf, now)
     return False
 
 
@@ -139,3 +141,38 @@ def _optimal_due(wf: Workflow, now: datetime) -> bool:
         return False
     next_slot = OptimalScheduler.next_slot_for(wf, now)
     return next_slot is not None and next_slot <= now
+
+
+def _adaptive_due(wf: Workflow, now: datetime) -> bool:
+    """ADAPTIVE schedule consultation. Looks at the workflow's own
+    published-post history to decide whether to fire."""
+    try:
+        import asyncio
+        from app.api.deps import _build_repos
+        from app.services.adaptive_scheduler import is_due
+    except ImportError:
+        return False
+    try:
+        repos = _build_repos()
+        post_repo = repos["post"]
+        # Sync wrapper — the Beat task is sync; we only need a small async
+        # query. asyncio.run is fine here because each tick is independent.
+        async def _gather() -> bool:
+            posts = await post_repo.list(wf.org_id)
+            wf_posts = [p for p in posts if p.workflow_id == wf.id]
+            due, decision = is_due(wf, wf_posts, now)
+            log.info(
+                "adaptive_schedule_decision",
+                workflow_id=str(wf.id),
+                interval_min=decision.interval_minutes,
+                reason=decision.reason,
+                recent_eng=decision.recent_engagement,
+                prior_eng=decision.prior_engagement,
+                due=due,
+            )
+            return due
+        return asyncio.run(_gather())
+    except Exception as exc:                                            # noqa: BLE001
+        log.warning("adaptive_schedule_failed_falling_back",
+                    workflow_id=str(wf.id), error=str(exc))
+        return False

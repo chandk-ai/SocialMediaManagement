@@ -1,9 +1,16 @@
-# Advanced features — v0.2
+# Advanced features — v0.2 + niche v0.3
 
 The v0.2 milestone adds eight first-class aggregates that move SMMS from
 "orchestrator that fans out single posts" to "content operating system
 for marketing teams". Everything below is wired into the in-memory
 backend by default; Supabase mirrors land in the next sprint.
+
+The v0.3 milestone (this sprint) layered niche features on top:
+**Telegram approval (#89)**, **Notion / Airtable as social CMS (#91)**,
+**compliance scanning (#92)**, **A/B auto-winner promotion (#95)**,
+**tamper-evident audit log (#97)**, **adaptive scheduling (#98)**,
+**Telegram group quorum (#99)**. Each one is documented in the in-app
+`/help` section and in the relevant area below.
 
 ## Campaigns (`/campaigns`)
 

@@ -11,6 +11,11 @@ class ScheduleKind(str, Enum):
     INTERVAL = "interval"
     MANUAL = "manual"
     OPTIMAL = "optimal"      # AI-driven best-time, consulted on every tick
+    ADAPTIVE = "adaptive"    # Engagement-driven self-scheduling (Niche #10):
+                              # cadence speeds up when recent engagement is
+                              # rising, slows down when it's falling. Uses
+                              # the same tick path as INTERVAL but the
+                              # interval is recomputed from post performance.
 
 
 @dataclass(frozen=True, slots=True)
