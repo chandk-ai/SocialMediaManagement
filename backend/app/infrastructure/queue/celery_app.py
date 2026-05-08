@@ -5,8 +5,24 @@ Workers run agent pipelines; the API layer stays responsive by enqueueing.
 from __future__ import annotations
 
 from celery import Celery
+from celery.signals import beat_init, worker_process_init
 
 from app.core.config import get_settings
+from app.infrastructure.observability.sentry import configure_sentry
+
+
+@worker_process_init.connect
+def _init_sentry_in_worker(**_: object) -> None:
+    """Each Celery worker process needs its own Sentry init — the SDK lives in
+    process-local state and isn't inherited by forks. No-op when SENTRY_DSN is
+    unset."""
+    configure_sentry()
+
+
+@beat_init.connect
+def _init_sentry_in_beat(**_: object) -> None:
+    """Beat is a separate process from the workers; init independently."""
+    configure_sentry()
 
 
 def make_celery() -> Celery:

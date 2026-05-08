@@ -18,6 +18,7 @@ from jose import JWTError, jwt
 from app.core.config import Settings, get_settings
 from app.domain.entities.user import Role
 from app.domain.exceptions import AuthError
+from app.infrastructure.observability.sentry import set_request_context
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -100,7 +101,9 @@ async def get_current_user(
 
     # Dev / test mode shortcut: accept signed local JWT or a static dev token.
     if settings.env in {"dev", "test"} and creds.credentials.startswith("dev."):
-        return _dev_principal(creds.credentials)
+        principal = _dev_principal(creds.credentials)
+        _tag_principal_in_sentry(principal)
+        return principal
 
     backend = settings.resolved_auth_backend()
     try:
@@ -109,17 +112,19 @@ async def get_current_user(
             sa = SupabaseAuth(settings)
             raw = await sa.verify(creds.credentials)
             mapped = SupabaseAuth.map_claims(raw)
-            return Principal(
+            principal = Principal(
                 subject=mapped["subject"], email=mapped["email"], name=mapped["name"],
                 org_id=mapped["org_id"], role=mapped["role"], raw_claims=raw,
             )
+            _tag_principal_in_sentry(principal)
+            return principal
         # default: Okta / OIDC
         claims = await verify_token(creds.credentials, settings)
     except AuthError as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
 
     role_claim = claims.get("role") or "viewer"
-    return Principal(
+    principal = Principal(
         subject=claims["sub"],
         email=claims.get("email", ""),
         name=claims.get("name", ""),
@@ -127,6 +132,22 @@ async def get_current_user(
         role=Role(role_claim),
         raw_claims=claims,
     )
+    _tag_principal_in_sentry(principal)
+    return principal
+
+
+def _tag_principal_in_sentry(principal: Principal) -> None:
+    """Push user_id / org_id / role onto the current Sentry scope so any
+    error raised after auth resolves carries the affected tenant. No-op when
+    Sentry isn't initialised."""
+    try:
+        set_request_context(
+            user_id=principal.subject or None,
+            org_id=principal.org_id or None,
+            role=principal.role.value if hasattr(principal.role, "value") else str(principal.role),
+        )
+    except Exception:                                                   # noqa: BLE001
+        pass
 
 
 def requires_role(*allowed: Role):

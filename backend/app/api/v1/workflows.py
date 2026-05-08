@@ -5,8 +5,9 @@ from uuid import UUID
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from pydantic import BaseModel
 
-from app.api.deps import current_user, get_workflow_service
+from app.api.deps import current_user, get_audit_log_service, get_workflow_service
 from app.core.security import Principal
+from app.services.audit_log import AuditLogService
 from app.domain.entities.workflow import WorkflowConfig
 from app.domain.value_objects.ids import OrgId, PlatformId, SourceId, WorkflowId
 from app.domain.value_objects.schedule import Schedule, ScheduleKind
@@ -145,10 +146,18 @@ async def delete_workflow(
     workflow_id: UUID,
     user: Principal = Depends(current_user),
     svc: WorkflowService = Depends(get_workflow_service),
+    audit: AuditLogService | None = Depends(get_audit_log_service),
 ) -> None:
     if not user.role.can_edit():
         raise HTTPException(status_code=403, detail="Editor role required")
     await svc.delete(OrgId(UUID(user.org_id)), WorkflowId(workflow_id))
+    if audit is not None:
+        await audit.record(
+            org_id=user.org_id,
+            action="workflow.delete",
+            resource_type="workflow",
+            resource_id=workflow_id,
+        )
 
 
 @router.post("/{workflow_id}/activate", response_model=WorkflowOut)
@@ -156,11 +165,20 @@ async def activate(
     workflow_id: UUID,
     user: Principal = Depends(current_user),
     svc: WorkflowService = Depends(get_workflow_service),
+    audit: AuditLogService | None = Depends(get_audit_log_service),
 ) -> WorkflowOut:
     try:
         wf = await svc.activate(OrgId(UUID(user.org_id)), WorkflowId(workflow_id))
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if audit is not None:
+        await audit.record(
+            org_id=user.org_id,
+            action="workflow.activate",
+            resource_type="workflow",
+            resource_id=wf.id,
+            after={"name": wf.name, "status": wf.status.value},
+        )
     return _to_out(wf)
 
 
@@ -169,11 +187,20 @@ async def pause(
     workflow_id: UUID,
     user: Principal = Depends(current_user),
     svc: WorkflowService = Depends(get_workflow_service),
+    audit: AuditLogService | None = Depends(get_audit_log_service),
 ) -> WorkflowOut:
     try:
         wf = await svc.pause(OrgId(UUID(user.org_id)), WorkflowId(workflow_id))
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if audit is not None:
+        await audit.record(
+            org_id=user.org_id,
+            action="workflow.pause",
+            resource_type="workflow",
+            resource_id=wf.id,
+            after={"name": wf.name, "status": wf.status.value},
+        )
     return _to_out(wf)
 
 
@@ -253,9 +280,22 @@ async def run_now(
     background: BackgroundTasks,
     user: Principal = Depends(current_user),
     svc: WorkflowService = Depends(get_workflow_service),
+    audit: AuditLogService | None = Depends(get_audit_log_service),
 ) -> WorkflowRunOut:
     """Run the workflow inline (returns trace). For prod, dispatch via Celery."""
     run = await svc.run(OrgId(UUID(user.org_id)), WorkflowId(workflow_id))
+    if audit is not None:
+        await audit.record(
+            org_id=user.org_id,
+            action="workflow.run",
+            resource_type="workflow",
+            resource_id=workflow_id,
+            after={
+                "run_id": str(run.id),
+                "status": run.status.value,
+                "initiator": run.initiator,
+            },
+        )
     return WorkflowRunOut(
         id=run.id, workflow_id=run.workflow_id, status=run.status.value,
         revision_count=run.revision_count, started_at=run.started_at,

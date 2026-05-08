@@ -13,8 +13,24 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, State> {
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
-    // Wire to Sentry / Honeycomb here.
     console.error('UI ErrorBoundary caught:', error, info);
+    // Forward to Sentry. We dynamic-import so this file still works in the
+    // (uncommon) build configurations where @sentry/nextjs isn't available —
+    // in that case console.error above is the only surface.
+    void import('@sentry/nextjs')
+      .then((Sentry) => {
+        try {
+          Sentry.withScope((scope) => {
+            scope.setExtras({ componentStack: info?.componentStack });
+            Sentry.captureException(error);
+          });
+        } catch {
+          /* swallow — observability must never crash the app */
+        }
+      })
+      .catch(() => {
+        /* package not installed — ignore */
+      });
   }
 
   reset = () => this.setState({ hasError: false, message: undefined });

@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from app.adapters.sources.base import ContentSource, SourceConnectionError
 from app.api.deps import (
     current_user,
+    get_audit_log_service,
     get_plugin_service,
     get_source_service,
     get_workflow_service,
@@ -16,6 +17,7 @@ from app.core.security import Principal
 from app.domain.value_objects.ids import OrgId, SourceId
 from app.plugins.registry import PluginKind
 from app.schemas.sources import SourceCreate, SourceOut
+from app.services.audit_log import AuditLogService
 from app.services.plugin_service import PluginService
 from app.services.source_secrets import (
     decrypt_config,
@@ -83,6 +85,7 @@ async def create_source(
     user: Principal = Depends(current_user),
     svc: SourceService = Depends(get_source_service),
     plugins: PluginService = Depends(get_plugin_service),
+    audit: AuditLogService | None = Depends(get_audit_log_service),
 ) -> SourceOut:
     if not user.role.can_edit():
         raise HTTPException(status_code=403, detail="Editor role required")
@@ -94,6 +97,14 @@ async def create_source(
         display_name=body.display_name,
         config=encrypted_config,
     )
+    if audit is not None:
+        await audit.record(
+            org_id=user.org_id,
+            action="source.create",
+            resource_type="source",
+            resource_id=s.id,
+            after={"plugin_name": s.plugin_name, "display_name": s.display_name},
+        )
     return _to_out(s, plugins)
 
 
@@ -138,10 +149,21 @@ async def delete_source(
     source_id: UUID,
     user: Principal = Depends(current_user),
     svc: SourceService = Depends(get_source_service),
+    audit: AuditLogService | None = Depends(get_audit_log_service),
 ) -> None:
     if not user.role.can_edit():
         raise HTTPException(status_code=403, detail="Editor role required")
-    await svc.repo.delete(OrgId(UUID(user.org_id)), SourceId(source_id))
+    org_id = OrgId(UUID(user.org_id))
+    existing = await svc.repo.get(org_id, SourceId(source_id))
+    await svc.repo.delete(org_id, SourceId(source_id))
+    if audit is not None and existing is not None:
+        await audit.record(
+            org_id=user.org_id,
+            action="source.delete",
+            resource_type="source",
+            resource_id=source_id,
+            before={"plugin_name": existing.plugin_name, "display_name": existing.display_name},
+        )
 
 
 @router.post("/{source_id}/clone", response_model=SourceOut, status_code=http_status.HTTP_201_CREATED)

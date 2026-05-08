@@ -36,6 +36,7 @@ from app.repositories.ports import (
 )
 from app.services.directive_router import DirectiveRouter
 from app.services.llm_credentials import LlmCredentialsService
+from app.services.llm_usage import LlmUsageService
 from app.services.target_resolver import TargetResolver
 
 log = get_logger(__name__)
@@ -52,6 +53,7 @@ class WorkflowService:
         registry: PluginRegistry,
         review_repo: ReviewSessionRepository | None = None,
         llm_credentials: "LlmCredentialsService | None" = None,
+        llm_usage: "LlmUsageService | None" = None,
     ) -> None:
         self.repo = repo
         self.run_repo = run_repo
@@ -61,6 +63,7 @@ class WorkflowService:
         self.review_repo = review_repo
         self.registry = registry
         self.llm_credentials = llm_credentials
+        self.llm_usage = llm_usage
 
     async def _resolve_llm_api_key(self, org_id: OrgId, provider: str) -> str | None:
         """Look up the org's stored API key for the chosen provider, falling
@@ -300,7 +303,15 @@ class WorkflowService:
                                        payload={"count": len(items)}))
 
             api_key = await self._resolve_llm_api_key(org_id, wf.config.llm_provider)
-            orchestrator = build_orchestrator(wf, self.registry, api_key=api_key)
+            orchestrator = build_orchestrator(
+                wf, self.registry, api_key=api_key,
+                org_id=org_id, usage_service=self.llm_usage,
+                usage_context={
+                    "workflow_id": str(wf.id),
+                    "run_id": str(run.id),
+                    "trigger": "workflow_run",
+                },
+            )
             # Distinct plugin names — one draft per plugin, fanned out to all
             # connected accounts in `_persist_drafts`.
             unique_plugins: list[str] = []
@@ -451,7 +462,15 @@ class WorkflowService:
             self.registry,
         )
         api_key = await self._resolve_llm_api_key(run.org_id, wf.config.llm_provider)
-        orchestrator = build_orchestrator(wf, self.registry, api_key=api_key)
+        orchestrator = build_orchestrator(
+            wf, self.registry, api_key=api_key,
+            org_id=run.org_id, usage_service=self.llm_usage,
+            usage_context={
+                "workflow_id": str(wf.id),
+                "run_id": str(run.id),
+                "trigger": "rerun_with_feedback",
+            },
+        )
         state = AgentState(
             workflow_config=wf.config,
             target_platforms=[p.plugin_name for p in platforms],

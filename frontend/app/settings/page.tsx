@@ -138,14 +138,8 @@ export default function SettingsPage() {
             </div>
           </Card>
 
-          <Card>
-            <CardTitle>LLM budget</CardTitle>
-            <CardDescription>Monthly cap across all workflows</CardDescription>
-            <div className="mt-4 flex items-end gap-3">
-              <Input type="number" defaultValue={100} className="w-40" />
-              <span className="text-sm text-ink-500 mb-2">USD / month</span>
-            </div>
-          </Card>
+          <LlmBudgetCard />
+
 
           <Card>
             <CardTitle>Identity provider</CardTitle>
@@ -234,6 +228,119 @@ function PreferredPicker({ providers, currentProvider, currentModel }: {
         </p>
       )}
     </div>
+  );
+}
+
+type LlmUsage = {
+  billing_month: string;
+  mtd_spend_usd: number;
+  budget_usd: number;
+  remaining_usd: number;
+  over_budget: boolean;
+};
+
+function LlmBudgetCard() {
+  const { data: usage } = useApi<LlmUsage>('/llm-usage');
+  const [draft, setDraft] = useState<string>('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [ok, setOk] = useState(false);
+
+  // Hydrate the input from server state once it loads.
+  const cap = usage?.budget_usd ?? 0;
+  const spent = usage?.mtd_spend_usd ?? 0;
+  // Clamp to 0..100 so the bar never overflows visually even on overruns.
+  const pct = cap > 0 ? Math.min(100, Math.round((spent / cap) * 100)) : 0;
+
+  async function save() {
+    setBusy(true); setErr(null); setOk(false);
+    const v = Number(draft || cap);
+    if (!Number.isFinite(v) || v < 0) {
+      setErr('Enter a non-negative dollar amount.');
+      setBusy(false);
+      return;
+    }
+    try {
+      await api.put('/llm-usage/budget', { monthly_llm_budget_usd: v });
+      setOk(true);
+      setDraft('');
+      await mutate('/llm-usage');
+    } catch (e) {
+      const ae = e as ApiError;
+      setErr(ae?.detail || (e as Error)?.message || 'Save failed.');
+    } finally { setBusy(false); }
+  }
+
+  return (
+    <Card>
+      <CardTitle>LLM budget</CardTitle>
+      <CardDescription>
+        Hard cap on AI spend across every workflow this month. Hitting the cap
+        pauses all agent runs until you raise it. Set to <code>0</code> to
+        disable the limit.
+      </CardDescription>
+
+      {/* Spend meter */}
+      <div className="mt-4 rounded-xl border border-ink-100 p-3 bg-ink-50">
+        <div className="flex items-end justify-between mb-2">
+          <div>
+            <div className="text-[11px] uppercase tracking-wider text-ink-500">
+              Month-to-date spend
+            </div>
+            <div className="text-xl font-semibold tabular-nums">
+              ${spent.toFixed(2)}
+              {cap > 0 && (
+                <span className="text-sm text-ink-500 font-normal"> / ${cap.toFixed(2)}</span>
+              )}
+            </div>
+          </div>
+          {usage?.over_budget && (
+            <Badge tone="danger">Cap reached — runs paused</Badge>
+          )}
+        </div>
+        {cap > 0 ? (
+          <div className="h-1.5 rounded-full bg-ink-100 overflow-hidden">
+            <div
+              className={`h-full transition-all ${
+                usage?.over_budget ? 'bg-red-500' : pct >= 80 ? 'bg-amber-500' : 'bg-emerald-500'
+              }`}
+              style={{ width: `${pct}%` }}
+            />
+          </div>
+        ) : (
+          <p className="text-[11px] text-ink-500">No cap set — usage is unlimited.</p>
+        )}
+      </div>
+
+      {/* Edit cap */}
+      <div className="mt-4 flex items-end gap-3">
+        <div>
+          <label className="block text-[11px] text-ink-500 mb-1">Monthly cap</label>
+          <Input
+            type="number"
+            min={0}
+            step="1"
+            value={draft || (cap || '').toString()}
+            onChange={(e: any) => setDraft(e.target.value)}
+            className="w-40"
+          />
+        </div>
+        <span className="text-sm text-ink-500 mb-2">USD / month</span>
+        <Button size="sm" onClick={save} disabled={busy}>
+          {busy ? <Loader2 size={12} className="animate-spin" /> : null} Save
+        </Button>
+      </div>
+      {err && (
+        <div className="mt-2 flex items-start gap-2 text-[11px] text-red-800 bg-red-50 border border-red-200 rounded p-2">
+          <AlertTriangle size={12} className="mt-0.5" /> <span>{err}</span>
+        </div>
+      )}
+      {ok && (
+        <div className="mt-2 flex items-start gap-2 text-[11px] text-emerald-800 bg-emerald-50 border border-emerald-200 rounded p-2">
+          <CheckCircle2 size={12} className="mt-0.5" /> Saved.
+        </div>
+      )}
+    </Card>
   );
 }
 

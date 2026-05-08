@@ -15,6 +15,11 @@ from app.api.middleware import RequestContextMiddleware, SimpleRateLimitMiddlewa
 from app.api.v1 import api_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
+from app.domain.exceptions import LLMBudgetExceededError
+from app.infrastructure.observability.sentry import (
+    capture_exception as sentry_capture_exception,
+    configure_sentry,
+)
 from app.infrastructure.observability.tracing import configure_tracing
 from app.plugins.manager import PluginManager
 
@@ -48,6 +53,12 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     settings = get_settings()
+
+    # Initialise Sentry BEFORE the FastAPI instance is created so the
+    # Starlette/FastAPI integrations can hook into route registration. This
+    # is a no-op when SENTRY_DSN is unset; safe to call from tests too.
+    configure_sentry(settings)
+
     app = FastAPI(
         title=settings.api_title,
         version="0.1.0",
@@ -68,6 +79,10 @@ def create_app() -> FastAPI:
     app.add_middleware(
         SimpleRateLimitMiddleware,
         requests_per_minute=settings.security.rate_limit_per_minute,
+        # Pass the Redis URL so the limiter is correct across multiple web
+        # workers / pods. If Redis is unreachable the limiter falls back to
+        # in-memory counting (logged once, then silent).
+        redis_url=settings.redis.url or None,
     )
 
     app.include_router(api_router, prefix=settings.api_prefix)
@@ -76,8 +91,25 @@ def create_app() -> FastAPI:
     async def metrics() -> Response:
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
+    # Map LLM budget exhaustion to 402 (Payment Required) so the frontend
+    # can show a clear "budget exceeded" banner instead of a generic 500.
+    # Sentry receives this too — a budget hit is interesting signal even if
+    # it's not a bug per se.
+    @app.exception_handler(LLMBudgetExceededError)
+    async def budget_exceeded_handler(
+        request: Request, exc: LLMBudgetExceededError,
+    ) -> JSONResponse:
+        log.warning("llm_budget_exceeded_response", path=request.url.path, msg=str(exc))
+        return JSONResponse(
+            status_code=402,
+            content={"detail": str(exc), "code": "llm_budget_exceeded"},
+        )
+
     # Surface real exception details in the JSON response body so the frontend
     # banner can show a useful message (instead of the proxy's "Unknown error").
+    # Also hand the exception to Sentry — the FastAPI integration normally
+    # captures unhandled exceptions automatically, but installing a custom
+    # handler suppresses that path, so we re-emit explicitly here.
     @app.exception_handler(Exception)
     async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
         log.error(
@@ -87,6 +119,7 @@ def create_app() -> FastAPI:
             exc_msg=str(exc),
             traceback=traceback.format_exc(),
         )
+        sentry_capture_exception(exc)
         return JSONResponse(
             status_code=500,
             content={

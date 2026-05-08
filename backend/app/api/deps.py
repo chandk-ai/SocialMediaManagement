@@ -171,7 +171,58 @@ def get_workflow_service() -> WorkflowService:
         registry=get_registry(),
         review_repo=repos["review"],
         llm_credentials=_get_llm_credentials_service(),
+        llm_usage=_get_llm_usage_service(),
     )
+
+
+@lru_cache
+def _get_llm_usage_service():
+    """LLM usage service backed by Postgres. None on the in-memory backend
+    (no usage table exists in memory mode — budget guard is a no-op there)."""
+    settings = get_settings()
+    if settings.resolved_persistence_backend() != "supabase":
+        return None
+    try:
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from app.services.llm_usage import LlmUsageService
+        engine = create_async_engine(
+            settings.db_url(),
+            pool_pre_ping=True,
+            connect_args=settings.db_connect_args(),
+        )
+        sm = async_sessionmaker(engine, expire_on_commit=False)
+        return LlmUsageService(sm)
+    except Exception:                                            # noqa: BLE001
+        return None
+
+
+def get_llm_usage_service():
+    return _get_llm_usage_service()
+
+
+@lru_cache
+def _get_audit_log_service():
+    """Append-only audit log writer. None on memory backend (audit_log table
+    is Postgres-only); callers should null-guard."""
+    settings = get_settings()
+    if settings.resolved_persistence_backend() != "supabase":
+        return None
+    try:
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from app.services.audit_log import AuditLogService
+        engine = create_async_engine(
+            settings.db_url(),
+            pool_pre_ping=True,
+            connect_args=settings.db_connect_args(),
+        )
+        sm = async_sessionmaker(engine, expire_on_commit=False)
+        return AuditLogService(sm)
+    except Exception:                                            # noqa: BLE001
+        return None
+
+
+def get_audit_log_service():
+    return _get_audit_log_service()
 
 
 @lru_cache

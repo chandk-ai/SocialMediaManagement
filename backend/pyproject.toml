@@ -22,6 +22,8 @@ dependencies = [
   "feedparser>=6.0",
   "beautifulsoup4>=4.12",
   "prometheus-client>=0.20",
+  # Sentry — error monitoring & performance traces. No-op when SENTRY_DSN is unset.
+  "sentry-sdk[fastapi]>=2.5",
   # Supabase: Python SDK for auth/storage/realtime; Postgres traffic uses asyncpg above
   "supabase>=2.5",
   # optional, fall through gracefully if missing:

@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from app.api.deps import (
     current_user,
+    get_audit_log_service,
     get_platform_service,
     get_plugin_service,
     get_workflow_service,
@@ -19,6 +20,7 @@ from app.schemas.platforms import (
     PlatformGroupOut,
     PlatformOut,
 )
+from app.services.audit_log import AuditLogService
 from app.services.platform_service import PlatformService
 from app.services.plugin_service import PluginService
 from app.services.workflow_service import WorkflowService
@@ -71,6 +73,7 @@ async def create_platform(
     body: PlatformCreate,
     user: Principal = Depends(current_user),
     svc: PlatformService = Depends(get_platform_service),
+    audit: AuditLogService | None = Depends(get_audit_log_service),
 ) -> PlatformOut:
     if not user.role.can_edit():
         raise HTTPException(status_code=403, detail="Editor role required")
@@ -83,6 +86,18 @@ async def create_platform(
         is_default=body.is_default,
         tags=body.tags,
     )
+    if audit is not None:
+        await audit.record(
+            org_id=user.org_id,
+            action="platform.connect",
+            resource_type="platform",
+            resource_id=p.id,
+            after={
+                "plugin_name": p.plugin_name,
+                "display_name": p.display_name,
+                "account_handle": p.account_handle,
+            },
+        )
     return _to_out(p)
 
 
@@ -91,10 +106,27 @@ async def delete_platform(
     platform_id: UUID,
     user: Principal = Depends(current_user),
     svc: PlatformService = Depends(get_platform_service),
+    audit: AuditLogService | None = Depends(get_audit_log_service),
 ) -> None:
     if not user.role.can_edit():
         raise HTTPException(status_code=403, detail="Editor role required")
-    await svc.repo.delete(OrgId(UUID(user.org_id)), PlatformId(platform_id))
+    org_id = OrgId(UUID(user.org_id))
+    # Read the row first so we can record the disconnect with the plugin
+    # name + handle — the row is gone after delete().
+    existing = await svc.repo.get(org_id, PlatformId(platform_id))
+    await svc.repo.delete(org_id, PlatformId(platform_id))
+    if audit is not None and existing is not None:
+        await audit.record(
+            org_id=user.org_id,
+            action="platform.remove",
+            resource_type="platform",
+            resource_id=platform_id,
+            before={
+                "plugin_name": existing.plugin_name,
+                "display_name": existing.display_name,
+                "account_handle": existing.account_handle,
+            },
+        )
 
 
 @router.post("/{platform_id}/oauth/start")

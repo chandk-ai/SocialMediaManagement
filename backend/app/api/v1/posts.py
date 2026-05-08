@@ -6,12 +6,13 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status as http_status
 from pydantic import BaseModel
 
-from app.api.deps import current_user, get_post_service
+from app.api.deps import current_user, get_audit_log_service, get_post_service
 from app.core.security import Principal
 from app.domain.entities.post import PostStatus
 from app.domain.value_objects.content import Hashtag
 from app.domain.value_objects.ids import OrgId, PostId
 from app.schemas.posts import PostOut
+from app.services.audit_log import AuditLogService
 from app.services.post_service import PostService
 
 router = APIRouter()
@@ -105,6 +106,7 @@ async def publish_post_now(
     post_id: UUID,
     user: Principal = Depends(current_user),
     svc: PostService = Depends(get_post_service),
+    audit: AuditLogService | None = Depends(get_audit_log_service),
 ) -> dict:
     """Approve (if needed) and immediately enqueue for publishing."""
     if not user.role.can_edit():
@@ -122,7 +124,23 @@ async def publish_post_now(
         from app.workers.publish import publish_post as publish_task
         publish_task.delay(user.org_id, str(post_id))
     except Exception as exc:                                # noqa: BLE001
+        if audit is not None:
+            await audit.record(
+                org_id=user.org_id,
+                action="post.publish.fail",
+                resource_type="post",
+                resource_id=post_id,
+                after={"reason": str(exc)},
+            )
         return {"queued": False, "reason": str(exc), "post_id": str(post_id)}
+    if audit is not None:
+        await audit.record(
+            org_id=user.org_id,
+            action="post.publish",
+            resource_type="post",
+            resource_id=post_id,
+            after={"platform_id": str(p.platform_id), "queued": True},
+        )
     return {"queued": True, "post_id": str(post_id)}
 
 

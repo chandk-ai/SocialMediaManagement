@@ -13,9 +13,10 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
-from app.api.deps import current_user, get_llm_credentials_service
+from app.api.deps import current_user, get_audit_log_service, get_llm_credentials_service
 from app.core.security import Principal
 from app.domain.value_objects.ids import OrgId
+from app.services.audit_log import AuditLogService
 from app.services.llm_credentials import KNOWN_PROVIDERS, LlmCredentialsService
 
 router = APIRouter()
@@ -68,6 +69,7 @@ async def set_preferred(
     body: PreferenceBody,
     user: Principal = Depends(current_user),
     svc: LlmCredentialsService | None = Depends(get_llm_credentials_service),
+    audit: AuditLogService | None = Depends(get_audit_log_service),
 ) -> dict:
     if not user.role.can_edit():
         raise HTTPException(status_code=403, detail="Editor role required")
@@ -75,6 +77,15 @@ async def set_preferred(
     if body.provider and body.provider not in KNOWN_PROVIDERS:
         raise HTTPException(status_code=400, detail=f"Unknown provider: {body.provider}")
     await s.set_preferred(OrgId(UUID(user.org_id)), body.provider, body.model)
+    if audit is not None:
+        await audit.record(
+            org_id=user.org_id,
+            action="llm_key.set_preferred",
+            resource_type="llm_provider",
+            resource_id=None,
+            actor_id=user.subject if _is_uuid(user.subject) else None,
+            after={"provider": body.provider, "model": body.model},
+        )
     return {"ok": True, "provider": body.provider, "model": body.model}
 
 
@@ -84,6 +95,7 @@ async def set_key(
     body: KeyBody,
     user: Principal = Depends(current_user),
     svc: LlmCredentialsService | None = Depends(get_llm_credentials_service),
+    audit: AuditLogService | None = Depends(get_audit_log_service),
 ) -> dict:
     if provider == "preferred":
         # Belt-and-suspenders: if anything ever bypasses the route order,
@@ -101,6 +113,15 @@ async def set_key(
         await s.store_key(OrgId(UUID(user.org_id)), provider, body.api_key)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if audit is not None:
+        await audit.record(
+            org_id=user.org_id,
+            action="llm_key.set",
+            resource_type="llm_provider",
+            actor_id=user.subject if _is_uuid(user.subject) else None,
+            # Never log the secret — just a fingerprint of the new key.
+            after={"provider": provider, "last_4": body.api_key[-4:]},
+        )
     return {"ok": True, "provider": provider}
 
 
@@ -109,8 +130,25 @@ async def delete_key(
     provider: str,
     user: Principal = Depends(current_user),
     svc: LlmCredentialsService | None = Depends(get_llm_credentials_service),
+    audit: AuditLogService | None = Depends(get_audit_log_service),
 ) -> None:
     if not user.role.can_edit():
         raise HTTPException(status_code=403, detail="Editor role required")
     s = _require_svc(svc)
     await s.remove_key(OrgId(UUID(user.org_id)), provider)
+    if audit is not None:
+        await audit.record(
+            org_id=user.org_id,
+            action="llm_key.remove",
+            resource_type="llm_provider",
+            actor_id=user.subject if _is_uuid(user.subject) else None,
+            before={"provider": provider},
+        )
+
+
+def _is_uuid(s: str) -> bool:
+    try:
+        UUID(str(s))
+        return True
+    except (ValueError, TypeError, AttributeError):
+        return False

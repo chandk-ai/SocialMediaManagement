@@ -158,6 +158,23 @@ class ObservabilitySettings(BaseSettings):
     log_json: bool = True
 
 
+class SentrySettings(BaseSettings):
+    """Sentry error monitoring + performance tracing.
+
+    All fields are optional — when ``dsn`` is empty the SDK is never
+    initialised and the rest of the app is unaffected. We default the trace
+    sample rate to 10% so production traffic doesn't blow through the Sentry
+    plan; bump it for staging or A/B debugging.
+    """
+    model_config = SettingsConfigDict(env_prefix="SENTRY_")
+    dsn: str = ""                              # leave blank to disable
+    environment: str | None = None             # falls back to Settings.env
+    release: str | None = None                 # e.g. git sha — set in CI
+    traces_sample_rate: float = 0.1
+    profiles_sample_rate: float = 0.0
+    send_default_pii: bool = False             # we tag user_id/org_id explicitly
+
+
 class SupabaseSettings(BaseSettings):
     """Supabase project configuration.
 
@@ -206,6 +223,7 @@ class Settings(BaseSettings):
     llm: LLMSettings = Field(default_factory=LLMSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
     observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
+    sentry: SentrySettings = Field(default_factory=SentrySettings)
 
     # ── derived helpers ─────────────────────────────────────────────
     def resolved_persistence_backend(self) -> Literal["memory", "supabase"]:
