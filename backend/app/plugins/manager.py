@@ -27,6 +27,10 @@ class PluginManager:
             "app.adapters.review_channels",
             "app.adapters.media",
             "app.adapters.engagement",
+            # Niche #N+1 — selection-strategy plugins live here, not under
+            # adapters/, because they're orchestration logic that operates
+            # on items rather than wrapping an external service.
+            "app.services.selection",
         ):
             try:
                 self._load_built_in(pkg)

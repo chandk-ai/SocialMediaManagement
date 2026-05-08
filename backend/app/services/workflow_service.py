@@ -35,9 +35,12 @@ from app.repositories.ports import (
     WorkflowRepository,
     WorkflowRunRepository,
 )
+from app.domain.value_objects.selection import ItemMode
 from app.services.directive_router import DirectiveRouter
 from app.services.llm_credentials import LlmCredentialsService
 from app.services.llm_usage import LlmUsageService
+from app.services.selection.base import SelectionContext, SelectionStrategy
+from app.services.source_items import SourceItemsService
 from app.services.target_resolver import TargetResolver
 
 log = get_logger(__name__)
@@ -55,6 +58,7 @@ class WorkflowService:
         review_repo: ReviewSessionRepository | None = None,
         llm_credentials: "LlmCredentialsService | None" = None,
         llm_usage: "LlmUsageService | None" = None,
+        source_items: "SourceItemsService | None" = None,
     ) -> None:
         self.repo = repo
         self.run_repo = run_repo
@@ -65,6 +69,11 @@ class WorkflowService:
         self.registry = registry
         self.llm_credentials = llm_credentials
         self.llm_usage = llm_usage
+        # Niche #101 — persistent source-item registry for de-dup + claim.
+        # None when running on the in-memory backend (memory mode skips
+        # de-dup; the selection layer still runs but treats every item
+        # as new).
+        self.source_items = source_items
 
     async def _resolve_llm_api_key(self, org_id: OrgId, provider: str) -> str | None:
         """Look up the org's stored API key for the chosen provider, falling
@@ -290,12 +299,39 @@ class WorkflowService:
             run.transition(RunStatus.PLANNING)
             items = await load_items(sources, self.registry)
 
-            # ─── CMS path (Niche #3) ─────────────────────────────────
-            # If any source is in CMS mode, every item it yields is itself
-            # a publishable post — skip the agent loop entirely and turn
-            # rows into drafts directly. We still respect review channels
-            # and quorum gates downstream.
-            cms_items = [it for it in items if it.metadata.get("cms")]
+            # ── Persistent registry: register every fetched item so the
+            # selection layer can de-dup against prior runs and so /audit
+            # has a stable record of "what was considered today".
+            if self.source_items is not None:
+                try:
+                    by_source: dict[str, list] = {}
+                    for it in items:
+                        sid = str(it.metadata.get("source_id") or "")
+                        if sid:
+                            by_source.setdefault(sid, []).append(it)
+                    for sid, src_items in by_source.items():
+                        await self.source_items.upsert_seen(
+                            org_id, SourceId(UUID(sid)), src_items,
+                        )
+                except Exception as exc:                            # noqa: BLE001
+                    log.warning("source_items_upsert_failed", error=str(exc))
+
+            # ── SELECTING: pluggable strategy decides what to use ────
+            run.transition(RunStatus.SELECTING)
+            await self.run_repo.update(run)
+            selection_result = await self._run_selection(
+                org_id=org_id, run=run, wf=wf, sources=sources, items=items,
+                directive=directive, target_plugins=[
+                    p.plugin_name for p in platforms
+                ],
+            )
+
+            # CMS items get the per-item-with-bypass-agents path. Detection
+            # is now "any chosen item carries metadata.cms=True", so a
+            # workflow that mixes a Notion-CMS source and a normal RSS
+            # source still does the right thing (CMS items are always
+            # ONE_POST_PER_ITEM with the agent loop bypassed).
+            cms_items = [it for it in selection_result.chosen if it.metadata.get("cms")]
             if cms_items:
                 return await self._execute_cms(
                     run=run, wf=wf, platforms=platforms,
@@ -304,6 +340,22 @@ class WorkflowService:
                     review_recipient=review_recipient,
                     quorum_required=quorum_required,
                 )
+
+            # If selection returned nothing, end the run cleanly — better
+            # than running the agents on an empty bag, which would either
+            # hallucinate or fall back to a useless "first source item".
+            if not selection_result.chosen:
+                run.append(AgentTraceEvent(
+                    agent="selector", event="no_items_chosen",
+                    payload={"rationale": selection_result.rationale,
+                             "candidates": selection_result.candidates},
+                ))
+                run.transition(RunStatus.SUCCEEDED)
+                await self.run_repo.update(run)
+                return run
+
+            # Use only the chosen items downstream.
+            items = selection_result.chosen
 
             if directive:
                 run.append(AgentTraceEvent(agent="trigger", event="directive_received",
@@ -354,21 +406,58 @@ class WorkflowService:
                 except Exception as exc:                # noqa: BLE001
                     log.info("brand_voice_skipped", error=str(exc))
 
-            state = AgentState(
-                workflow_config=wf.config,
-                target_platforms=unique_plugins,
-                source_items=items, directive=directive,
-                voice_block=voice_block,
-            )
             run.transition(RunStatus.EXECUTING)
-            final_state = await orchestrator.run(state)
-            for ev in final_state.trace:
-                run.append(AgentTraceEvent(
-                    agent=ev["agent"], event=ev["event"],
-                    payload={k: v for k, v in ev.items() if k not in ("agent","event")},
-                ))
 
-            posts = await self._persist_drafts(run, wf, platforms, final_state)
+            # ── Item mode dispatch ──────────────────────────────────
+            # SYNTHESIZE: one agent invocation seeing all chosen items.
+            # ONE_POST_PER_ITEM: one agent invocation PER chosen item, so
+            # each item produces its own platform-tailored draft set.
+            # This is the runtime answer to "newsletter mode" without a
+            # separate code path — same agents, same persistence, just
+            # iterated.
+            mode = selection_result.mode
+            if mode is ItemMode.ONE_POST_PER_ITEM and len(items) > 1:
+                final_state, posts = await self._run_per_item_batches(
+                    run=run, wf=wf, platforms=platforms,
+                    items=items, directive=directive,
+                    unique_plugins=unique_plugins, voice_block=voice_block,
+                    orchestrator=orchestrator,
+                )
+            else:
+                state = AgentState(
+                    workflow_config=wf.config,
+                    target_platforms=unique_plugins,
+                    source_items=items, directive=directive,
+                    voice_block=voice_block,
+                )
+                final_state = await orchestrator.run(state)
+                for ev in final_state.trace:
+                    run.append(AgentTraceEvent(
+                        agent=ev["agent"], event=ev["event"],
+                        payload={k: v for k, v in ev.items() if k not in ("agent","event")},
+                    ))
+                posts = await self._persist_drafts(run, wf, platforms, final_state)
+
+            # Tag persisted Posts with their source linkage so the CMS-
+            # writeback path (or any future per-item analytics) can find
+            # them. We only know which item produced which post via
+            # blueprint reference. For now: if there's exactly one
+            # source item, every post points at it; otherwise leave the
+            # link blank (synthesize mode collapses many → one). In
+            # ONE_POST_PER_ITEM mode the per-item helper sets the link
+            # directly so this branch is a no-op there.
+            if len(items) == 1 and posts and items[0].metadata.get("source_id"):
+                sid = items[0].metadata["source_id"]
+                ext = items[0].external_id
+                for p in posts:
+                    if not p.source_id:
+                        p.source_id = SourceId(UUID(sid))
+                        p.source_external_id = ext
+                        await self.post_repo.update(p)
+                        if self.source_items is not None:
+                            await self.source_items.update_post_link(
+                                org_id, SourceId(UUID(sid)), ext, p.id,
+                            )
 
             # Decision branching ─────────────────────────────────────
             needs_human = (
@@ -408,6 +497,203 @@ class WorkflowService:
             run.transition(RunStatus.FAILED)
             await self.run_repo.update(run)
             raise
+
+    async def _run_per_item_batches(
+        self, *, run, wf, platforms, items, directive,
+        unique_plugins, voice_block, orchestrator,
+    ):
+        """Run the agent loop ONCE PER ITEM. Each iteration produces a
+        platform-tailored draft set for a single source item. Posts are
+        tagged with the source item's id so writeback + analytics can
+        find them.
+
+        Returns ``(merged_final_state, all_posts)`` so the caller's
+        decision-branching code keeps working unchanged.
+
+        Decision merging across iterations:
+          * any ESCALATE wins → run goes to AWAITING_REVIEW
+          * else any REVISE wins → REVISION still happens (rare —
+            it'd mean some items passed cleanly and others didn't)
+          * else APPROVE.
+        Critique notes from each iteration are concatenated.
+        """
+        all_posts: list[Post] = []
+        worst_decision = AgentDecision.APPROVE
+        merged_notes: list[str] = []
+        merged_drafts = []
+        merged_evals = []
+        for idx, item in enumerate(items, start=1):
+            run.append(AgentTraceEvent(
+                agent="selector", event="per_item_batch_start",
+                payload={"index": idx, "total": len(items),
+                         "external_id": item.external_id,
+                         "title": item.title[:120]},
+            ))
+            state = AgentState(
+                workflow_config=wf.config,
+                target_platforms=unique_plugins,
+                source_items=[item],
+                directive=directive,
+                voice_block=voice_block,
+            )
+            final_state = await orchestrator.run(state)
+            for ev in final_state.trace:
+                run.append(AgentTraceEvent(
+                    agent=ev["agent"],
+                    event=f"item{idx}.{ev['event']}",
+                    payload={k: v for k, v in ev.items() if k not in ("agent", "event")},
+                ))
+            posts = await self._persist_drafts(run, wf, platforms, final_state)
+            # Tag per-item provenance on each persisted Post.
+            sid = item.metadata.get("source_id")
+            if sid:
+                for p in posts:
+                    p.source_id = SourceId(UUID(sid))
+                    p.source_external_id = item.external_id
+                    await self.post_repo.update(p)
+                    if self.source_items is not None:
+                        await self.source_items.update_post_link(
+                            run.org_id, SourceId(UUID(sid)), item.external_id, p.id,
+                        )
+            all_posts.extend(posts)
+            merged_drafts.extend(final_state.drafts)
+            merged_evals.extend(final_state.evaluations)
+            merged_notes.extend(final_state.critique_notes)
+            # Worst-case decision merge.
+            if final_state.decision is AgentDecision.ESCALATE:
+                worst_decision = AgentDecision.ESCALATE
+            elif (
+                final_state.decision is AgentDecision.REVISE
+                and worst_decision is not AgentDecision.ESCALATE
+            ):
+                worst_decision = AgentDecision.REVISE
+
+        # Build a synthetic final_state so the caller's decision-branching
+        # code keeps working without knowing about per-item iteration.
+        merged = AgentState(
+            workflow_config=wf.config,
+            target_platforms=unique_plugins,
+            source_items=items,
+            directive=directive,
+            voice_block=voice_block,
+        )
+        merged.drafts = merged_drafts
+        merged.evaluations = merged_evals
+        merged.critique_notes = merged_notes
+        merged.decision = worst_decision
+        return merged, all_posts
+
+    async def _run_selection(
+        self,
+        *,
+        org_id: OrgId,
+        run: WorkflowRun,
+        wf: Workflow,
+        sources: list,
+        items: list,
+        directive: str,
+        target_plugins: list[str],
+    ):
+        """Run the configured SelectionStrategy plugin against the loaded
+        items. Marks chosen items as consumed atomically so a concurrent
+        run can't double-process. Records skipped items + the rationale
+        in the run trace so /audit shows the decision.
+
+        Falls back to the freshness strategy with empty config when the
+        configured strategy isn't registered (graceful — the workflow
+        still runs but with the default behaviour)."""
+        from app.domain.value_objects.selection import SelectionResult, ItemMode as _IM
+        strategy_name = (wf.config.selection_strategy or "freshness").strip()
+        try:
+            entry = self.registry.get(PluginKind.SELECTION, strategy_name)
+        except Exception:                                              # noqa: BLE001
+            log.warning("selection_strategy_not_found_falling_back",
+                        requested=strategy_name)
+            entry = self.registry.get(PluginKind.SELECTION, "freshness")
+
+        strategy: SelectionStrategy = entry.cls(config=wf.config.selection_config or {})
+
+        # Gather the consumed-keys set once for this workflow's sources.
+        consumed_keys: set[tuple[str, str]] = set()
+        if self.source_items is not None:
+            try:
+                consumed_keys = await self.source_items.consumed_keys(
+                    org_id, [SourceId(s.id) for s in sources if s],
+                )
+            except Exception as exc:                                   # noqa: BLE001
+                log.warning("consumed_keys_lookup_failed", error=str(exc))
+
+        ctx = SelectionContext(
+            candidates=items,
+            consumed_keys=consumed_keys,
+            workflow_config=wf.config,
+            target_platforms=target_plugins,
+            directive=directive or None,
+            org_id=org_id,
+        )
+        try:
+            result: SelectionResult = await strategy.select(ctx)
+        except Exception as exc:                                       # noqa: BLE001
+            # A buggy strategy must not crash the workflow — fall back to
+            # "every unseen item, synthesise" so the run still produces
+            # something useful.
+            log.exception("selection_strategy_failed", strategy=strategy_name)
+            unseen = [
+                it for it in items
+                if (str(it.metadata.get("source_id", "")), it.external_id) not in consumed_keys
+            ]
+            result = SelectionResult(
+                chosen=unseen[:5], mode=_IM.SYNTHESIZE,
+                rationale=f"strategy {strategy_name!r} crashed; using top-5 unseen fallback",
+                skipped=[], candidates=len(items),
+            )
+
+        run.append(AgentTraceEvent(
+            agent="selector", event="strategy_complete",
+            payload={
+                "strategy": strategy_name, "mode": result.mode.value,
+                "candidates": result.candidates,
+                "chosen": len(result.chosen),
+                "skipped": [
+                    {"source_id": str(s.source_id), "external_id": s.external_id,
+                     "reason": s.reason}
+                    for s in result.skipped[:25]   # cap so the trace doesn't bloat
+                ],
+                "rationale": result.rationale,
+            },
+        ))
+
+        # Atomic claim: flip status='new' → 'consumed' for every chosen item
+        # BEFORE the agent loop runs. If two concurrent runs see the same
+        # item, only one's UPDATE finds status='new' and wins. The other's
+        # claim returns False → we drop that item from the chosen list.
+        if self.source_items is not None and result.chosen:
+            actually_chosen = []
+            for item in result.chosen:
+                sid = str(item.metadata.get("source_id") or "")
+                if not sid or not item.external_id:
+                    actually_chosen.append(item)        # in-memory item — keep as-is
+                    continue
+                claimed = await self.source_items.mark_consumed(
+                    org_id=org_id,
+                    source_id=SourceId(UUID(sid)),
+                    external_id=item.external_id,
+                    run_id=run.id,
+                )
+                if claimed:
+                    actually_chosen.append(item)
+                else:
+                    log.info("source_item_claim_lost",
+                             source_id=sid, external_id=item.external_id)
+            result = SelectionResult(
+                chosen=actually_chosen,
+                mode=result.mode,
+                rationale=result.rationale,
+                skipped=result.skipped,
+                candidates=result.candidates,
+            )
+
+        return result
 
     async def _execute_cms(
         self,

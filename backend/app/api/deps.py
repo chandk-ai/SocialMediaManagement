@@ -172,6 +172,7 @@ def get_workflow_service() -> WorkflowService:
         review_repo=repos["review"],
         llm_credentials=_get_llm_credentials_service(),
         llm_usage=_get_llm_usage_service(),
+        source_items=_get_source_items_service(),
     )
 
 
@@ -223,6 +224,32 @@ def _get_team_service():
 
 def get_team_service():
     return _get_team_service()
+
+
+@lru_cache
+def _get_source_items_service():
+    """Postgres-backed source-items registry. None on memory backend —
+    the workflow service detects this and skips the de-dup / claim path
+    (the selection layer still runs, just without persistent memory)."""
+    settings = get_settings()
+    if settings.resolved_persistence_backend() != "supabase":
+        return None
+    try:
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from app.services.source_items import SourceItemsService
+        engine = create_async_engine(
+            settings.db_url(),
+            pool_pre_ping=True,
+            connect_args=settings.db_connect_args(),
+        )
+        sm = async_sessionmaker(engine, expire_on_commit=False)
+        return SourceItemsService(sm)
+    except Exception:                                            # noqa: BLE001
+        return None
+
+
+def get_source_items_service():
+    return _get_source_items_service()
 
 
 @lru_cache

@@ -72,6 +72,12 @@ function Wizard() {
     profiles: { name: string; label: string; description: string;
                 docs_url: string | null; rule_count: number }[];
   }>('/compliance/profiles');
+  const { data: selectionCatalog } = useApi<{
+    strategies: {
+      name: string; display_name: string; description: string;
+      config_schema: { properties?: Record<string, any> };
+    }[];
+  }>('/selection/strategies');
 
   const [step, setStep] = useState<StepKey>(initialTemplate ? 'sources' : 'template');
   const [template, setTemplate] = useState<WorkflowTemplate | null>(
@@ -90,6 +96,11 @@ function Wizard() {
   const [llmModel, setLlmModel] = useState<string>('');           // '' → backend's per-provider default
   const [complianceProfile, setComplianceProfile] = useState<string>('');     // '' = no scan
   const [customSystemPrompt, setCustomSystemPrompt] = useState<string>('');   // '' = no override
+  // Item-selection (Niche #101). Defaults to 'freshness' — newest unseen
+  // items, dedup forever. 'per_item' = one post per item (newsletter
+  // pattern). 'roundrobin' = one item from each source in rotation.
+  const [selectionStrategy, setSelectionStrategy] = useState<string>('freshness');
+  const [selectionConfig, setSelectionConfig] = useState<Record<string, unknown>>({});
   const [scheduleKind, setScheduleKind] = useState<'manual' | 'cron' | 'interval' | 'once'>('manual');
   const [cron, setCron] = useState('');
   const [intervalMinutes, setIntervalMinutes] = useState('');
@@ -204,6 +215,8 @@ function Wizard() {
           llm_model: llmModel || undefined,
           compliance_profile: complianceProfile || null,
           custom_system_prompt: customSystemPrompt.trim() || null,
+          selection_strategy: selectionStrategy || 'freshness',
+          selection_config: selectionConfig,
         },
         schedule: {
           kind: scheduleKind,
@@ -281,6 +294,11 @@ function Wizard() {
                 complianceCatalog={complianceCatalog?.profiles ?? []}
                 customSystemPrompt={customSystemPrompt}
                 setCustomSystemPrompt={setCustomSystemPrompt}
+                selectionStrategy={selectionStrategy}
+                setSelectionStrategy={setSelectionStrategy}
+                selectionConfig={selectionConfig}
+                setSelectionConfig={setSelectionConfig}
+                selectionCatalog={selectionCatalog?.strategies ?? []}
               />
             )}
             {step === 'review' && (
@@ -559,6 +577,8 @@ function StepVoice(props: any) {
     timezone, setTimezone,
     complianceProfile, setComplianceProfile, complianceCatalog,
     customSystemPrompt, setCustomSystemPrompt,
+    selectionStrategy, setSelectionStrategy,
+    selectionConfig, setSelectionConfig, selectionCatalog,
   } = props;
   return (
     <Card>
@@ -631,6 +651,87 @@ function StepVoice(props: any) {
               })()}
             </p>
           )}
+        </div>
+
+        <div className="md:col-span-2">
+          <label className="block text-xs text-ink-500 mb-1">
+            Item selection strategy
+          </label>
+          <select
+            className="input"
+            value={selectionStrategy}
+            onChange={(e: any) => {
+              setSelectionStrategy(e.target.value);
+              setSelectionConfig({});         // reset config when strategy changes
+            }}
+          >
+            {(selectionCatalog ?? []).map((s: any) => (
+              <option key={s.name} value={s.name}>
+                {s.display_name}
+              </option>
+            ))}
+            {!(selectionCatalog ?? []).length && (
+              <option value="freshness">Freshness — newest unseen items</option>
+            )}
+          </select>
+          <p className="text-[11px] text-ink-500 mt-1">
+            {(selectionCatalog ?? []).find((s: any) => s.name === selectionStrategy)?.description
+              ?? 'How the agents decide which items from your sources to use.'}
+          </p>
+          {/* Schema-driven config — render fields for the chosen strategy. */}
+          {(() => {
+            const schema = (selectionCatalog ?? []).find(
+              (s: any) => s.name === selectionStrategy,
+            )?.config_schema;
+            const props = schema?.properties || {};
+            const keys = Object.keys(props);
+            if (keys.length === 0) return null;
+            return (
+              <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3 rounded border border-ink-100 p-3 bg-ink-50/40">
+                {keys.map((k) => {
+                  const f = props[k];
+                  const val = (selectionConfig as any)[k] ?? f.default ?? '';
+                  const update = (v: any) =>
+                    setSelectionConfig({ ...(selectionConfig || {}), [k]: v });
+                  return (
+                    <div key={k} className="text-xs">
+                      <label className="block text-ink-500 mb-1">
+                        {f.title || k}
+                      </label>
+                      {f.type === 'integer' || f.type === 'number' ? (
+                        <Input
+                          type="number"
+                          min={f.minimum} max={f.maximum}
+                          value={val}
+                          onChange={(e: any) => update(Number(e.target.value))}
+                        />
+                      ) : f.type === 'boolean' ? (
+                        <label className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={!!val}
+                            onChange={(e) => update(e.target.checked)}
+                          />
+                          <span>{f.description || ''}</span>
+                        </label>
+                      ) : f.enum ? (
+                        <select className="input" value={val} onChange={(e: any) => update(e.target.value)}>
+                          {f.enum.map((opt: string) => (
+                            <option key={opt} value={opt}>{opt}</option>
+                          ))}
+                        </select>
+                      ) : (
+                        <Input value={val} onChange={(e: any) => update(e.target.value)} />
+                      )}
+                      {f.description && f.type !== 'boolean' && (
+                        <p className="text-[10px] text-ink-400 mt-0.5">{f.description}</p>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
         </div>
 
         <div className="md:col-span-2">

@@ -46,6 +46,15 @@ class WorkflowConfig:
     # precedence — this can't accidentally turn the planner into a
     # different agent.
     custom_system_prompt: str | None = None
+    # Pluggable item-selection strategy (Niche #101). Plugin name from the
+    # SELECTION registry; ``selection_config`` is the per-strategy config
+    # blob matching that strategy's ``config_schema``. Default
+    # ``"freshness"`` keeps behaviour backwards-compatible with the
+    # pre-niche "first-N-by-recency" mode but adds persistent de-dup via
+    # smms.source_items. ``"per_item"`` for newsletter-style fan-out,
+    # ``"roundrobin"`` for fairness across sources.
+    selection_strategy: str = "freshness"
+    selection_config: dict = field(default_factory=dict)
     extra: dict = field(default_factory=dict)
 
 

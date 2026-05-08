@@ -45,6 +45,8 @@ def _to_config(c: WorkflowConfigIn) -> WorkflowConfig:
             else None
         ),
         custom_system_prompt=(c.custom_system_prompt or "").strip() or None,
+        selection_strategy=(c.selection_strategy or "freshness").strip() or "freshness",
+        selection_config=dict(c.selection_config or {}),
         extra=c.extra,
     )
 

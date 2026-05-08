@@ -26,6 +26,10 @@ class WorkflowConfigIn(APIModel):
     # Power-user override: appended to the Planner + Executor system
     # prompts. None / empty = no override.
     custom_system_prompt: str | None = None
+    # Pluggable item-selection (Niche #101). plugin name + per-strategy
+    # config (must conform to that strategy's ``config_schema``).
+    selection_strategy: str = "freshness"
+    selection_config: dict = Field(default_factory=dict)
     extra: dict = Field(default_factory=dict)
 
 

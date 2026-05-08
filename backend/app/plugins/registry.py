@@ -23,6 +23,10 @@ class PluginKind(str, Enum):
     REVIEW_CHANNEL = "review_channel"
     MEDIA = "media"
     ENGAGEMENT = "engagement"
+    # Item-selection strategies — pluggable layer that decides which
+    # SourceItems to feed to the agents and in what mode (synthesize vs
+    # one-post-per-item). See app/services/selection/base.py.
+    SELECTION = "selection"
 
 
 @dataclass

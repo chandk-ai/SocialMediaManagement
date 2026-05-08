@@ -542,6 +542,57 @@ function BuildingWorkflows() {
         post history.
       </P>
 
+      <H2 id="wf-selection">How items become posts (selection strategies)</H2>
+      <P>
+        When a workflow's sources contain many items (100 RSS items, 50 Drive
+        files, 200 Notion rows), the system needs to decide which items to
+        use this run and how to turn them into posts. That decision is a{' '}
+        <strong>selection strategy</strong> you pick in the wizard's Voice &
+        schedule step.
+      </P>
+      <P>Built-in strategies:</P>
+      <Bullets>
+        <li>
+          <strong>Freshness (default)</strong> — newest unseen items, capped
+          per source, optionally bounded by a freshness window. Synthesises
+          everything into one post per platform. Backwards-compatible with
+          the historical first-N-by-recency behaviour, now with persistent
+          de-dup.
+        </li>
+        <li>
+          <strong>Per item</strong> — every new item becomes its own post
+          (one agent invocation per item, fanned out to every target
+          platform). Newsletter / blog / podcast pattern. Same shape as
+          Notion CMS-mode but works for any source.
+        </li>
+        <li>
+          <strong>Round-robin</strong> — pulls one (or N) item from each
+          source in rotation. Stops a noisy feed from drowning out quieter
+          ones. Configurable: synthesize all chosen items, or fan out to
+          one post per item.
+        </li>
+      </Bullets>
+      <P>
+        <strong>De-dup is automatic.</strong> Every (source, external-id)
+        pair the system has consumed lives in <code>smms.source_items</code>.
+        A workflow running daily on the same RSS feed will never re-publish
+        yesterday's article. To re-use an item, an admin can reset its
+        status via API or DB.
+      </P>
+      <P>
+        Selection runs in its own pipeline step (<code>RunStatus.SELECTING</code>)
+        between Planning and Executing. Open a run's trace and you'll see
+        entries like <code>selector.strategy_complete</code> with{' '}
+        <em>candidates / chosen / skipped</em> counts and a per-item rationale.
+        Useful for "why didn't today's blog post go out?" debugging.
+      </P>
+      <P>
+        Adding a custom strategy is a one-file change: drop a class under{' '}
+        <code>app/services/selection/</code> with{' '}
+        <code>@register_plugin("selection", "your_name")</code>, and it
+        appears in the wizard with a schema-driven config form.
+      </P>
+
       <H2 id="wf-context">Where the agent's behaviour comes from</H2>
       <P>
         Each draft is built from <strong>six</strong> stacked layers of context.

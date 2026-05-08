@@ -11,6 +11,9 @@ from ..value_objects.ids import OrgId, RunId, TriggerId, WorkflowId, new_id
 class RunStatus(str, Enum):
     QUEUED = "queued"
     PLANNING = "planning"
+    # Item-selection layer: filters + ranks SourceItems before they're
+    # handed to the agents. See app/services/selection/.
+    SELECTING = "selecting"
     EXECUTING = "executing"
     EVALUATING = "evaluating"
     CRITIQUING = "critiquing"
