@@ -31,6 +31,42 @@ def _redact_db_url(url: str) -> str:
     return re.sub(r"(://[^:]+:)[^@]+(@)", r"\1***\2", url or "")
 
 
+async def _lookup_org_rate_limit(org_id: str) -> int | None:
+    """Per-org rate-limit lookup used by SimpleRateLimitMiddleware.
+
+    Returns ``Organization.rate_limit_per_minute`` if positive, else None
+    (so the middleware falls back to the global default). Returns None on
+    any error so a transient DB hiccup doesn't make the limiter throw —
+    we'd rather over-allow briefly than 500 every request.
+    """
+    settings = get_settings()
+    if settings.resolved_persistence_backend() != "supabase":
+        return None
+    try:
+        from uuid import UUID
+        from sqlalchemy import text
+        from sqlalchemy.ext.asyncio import create_async_engine
+        engine = create_async_engine(
+            settings.db_url(),
+            connect_args=settings.db_connect_args(),
+            pool_pre_ping=False,
+            pool_size=1,
+            max_overflow=0,
+        )
+        async with engine.connect() as conn:
+            row = (await conn.execute(
+                text(
+                    "SELECT rate_limit_per_minute "
+                    "FROM smms.organizations WHERE id = :id"
+                ),
+                {"id": UUID(org_id)},
+            )).first()
+        await engine.dispose()
+        return int(row.rate_limit_per_minute) if row and row.rate_limit_per_minute else None
+    except Exception:                                                   # noqa: BLE001
+        return None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
@@ -83,6 +119,10 @@ def create_app() -> FastAPI:
         # workers / pods. If Redis is unreachable the limiter falls back to
         # in-memory counting (logged once, then silent).
         redis_url=settings.redis.url or None,
+        # Per-org override callback. Fetches Organization.rate_limit_per_minute
+        # for known org_ids and uses it instead of the global default.
+        # Cached inside the middleware for ~60s to avoid per-request DB hits.
+        get_org_capacity=_lookup_org_rate_limit,
     )
 
     app.include_router(api_router, prefix=settings.api_prefix)

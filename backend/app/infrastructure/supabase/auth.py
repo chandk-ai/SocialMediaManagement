@@ -141,8 +141,15 @@ class SupabaseAuth:
         """Translate Supabase JWT claims into our Principal fields.
 
         Convention:
-        * Supabase users carry `app_metadata.org_id` and `app_metadata.role`
-          (set via Admin API or a database trigger when the user is provisioned).
+        * Supabase users CAN carry ``app_metadata.org_id`` + ``app_metadata.role``
+          (set via Admin API or a database trigger when provisioned). When
+          present, those win and the auth path uses them directly.
+        * When absent (the common case for fresh sign-ins), ``org_id`` is
+          left as ``None`` so :func:`_maybe_resolve_via_team` can resolve
+          via the local users table or pending invitation. The previous
+          implementation defaulted to a shared placeholder org which was
+          a multi-tenant foot-gun — every unclaimed signup landed in the
+          same workspace and could see each other's data.
         * Top-level `sub`, `email` are standard.
         """
         meta = (claims.get("app_metadata") or {}) | (claims.get("user_metadata") or {})
@@ -150,6 +157,6 @@ class SupabaseAuth:
             "subject": claims["sub"],
             "email": claims.get("email", ""),
             "name": meta.get("display_name") or claims.get("email", ""),
-            "org_id": meta.get("org_id", "00000000-0000-0000-0000-000000000001"),
+            "org_id": meta.get("org_id"),       # None → resolve via team service
             "role": Role(meta.get("role") or "viewer"),
         }

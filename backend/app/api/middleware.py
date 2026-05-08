@@ -21,7 +21,7 @@ import json
 import time
 import uuid
 from collections import defaultdict, deque
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -100,7 +100,15 @@ class SimpleRateLimitMiddleware(BaseHTTPMiddleware):
     the per-second refill rate (smoothed average).
     """
 
-    def __init__(self, app, *, requests_per_minute: int, redis_url: str | None = None) -> None:
+    def __init__(
+        self,
+        app,
+        *,
+        requests_per_minute: int,
+        redis_url: str | None = None,
+        get_org_capacity: Callable[[str], Awaitable[int | None]] | None = None,
+        org_capacity_ttl_seconds: float = 60.0,
+    ) -> None:
         super().__init__(app)
         self._cap = max(1, int(requests_per_minute))
         self._refill = self._cap / 60.0
@@ -110,6 +118,13 @@ class SimpleRateLimitMiddleware(BaseHTTPMiddleware):
         self._redis_failed = False
         # In-memory fallback: sliding window of timestamps per key.
         self._buckets: dict[str, deque[float]] = defaultdict(deque)
+        # Per-org capacity override: when set, the limiter asks the callback
+        # for each known org_id and uses ``Organization.rate_limit_per_minute``
+        # if it returns a positive int. Cached for `org_capacity_ttl_seconds`
+        # so we don't query Postgres on every request.
+        self._get_org_capacity = get_org_capacity
+        self._org_cache_ttl = float(org_capacity_ttl_seconds)
+        self._org_cap_cache: dict[str, tuple[int, float]] = {}    # org → (cap, fetched_at)
 
     # ── key derivation ──────────────────────────────────────────────────
     @staticmethod
@@ -139,26 +154,55 @@ class SimpleRateLimitMiddleware(BaseHTTPMiddleware):
             or (payload.get("app_metadata") or {}).get("org_id")
         )
 
-    def _bucket_key(self, request: Request) -> str:
+    def _bucket_key(self, request: Request) -> tuple[str, str | None]:
+        """Return (bucket_key, org_id_if_any)."""
         org_id = self._decode_org_id(request.headers.get("authorization"))
         if org_id:
-            return f"rl:http:org:{org_id}"
+            return f"rl:http:org:{org_id}", org_id
         ip = request.client.host if request.client else "anon"
-        return f"rl:http:ip:{ip}"
+        return f"rl:http:ip:{ip}", None
+
+    async def _capacity_for(self, org_id: str | None) -> tuple[int, float]:
+        """Return (capacity, refill_per_sec) for this caller. Per-org override
+        wins over the global default; global default is the fallback for
+        anonymous traffic and orgs that haven't customised theirs."""
+        if org_id and self._get_org_capacity is not None:
+            now = time.time()
+            cached = self._org_cap_cache.get(org_id)
+            if cached and (now - cached[1]) < self._org_cache_ttl:
+                return cached[0], cached[0] / 60.0
+            try:
+                override = await self._get_org_capacity(org_id)
+            except Exception as exc:                                    # noqa: BLE001
+                log.debug("rate_limit_org_lookup_failed",
+                          org_id=org_id, error=str(exc))
+                override = None
+            if override and int(override) > 0:
+                cap = int(override)
+                self._org_cap_cache[org_id] = (cap, now)
+                return cap, cap / 60.0
+            # Negative caches reduce DB pressure — re-fetch once the TTL is up.
+            self._org_cap_cache[org_id] = (self._cap, now)
+        return self._cap, self._refill
 
     # ── dispatch ────────────────────────────────────────────────────────
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         # Skip rate limiting for the metrics scrape and health endpoints —
-        # these are polled aggressively by Render / Prometheus.
+        # these are polled aggressively by Render / Prometheus / k8s.
         path = request.url.path
-        if path in {"/metrics", "/api/v1/health", "/api/v1/health/ready"}:
+        if path in {
+            "/metrics",
+            "/api/v1/health", "/api/v1/health/ready",
+            "/api/v1/ready",
+        }:
             return await call_next(request)
 
-        key = self._bucket_key(request)
-        wait = await self._compute_wait(key)
+        key, org_id = self._bucket_key(request)
+        cap, refill = await self._capacity_for(org_id)
+        wait = await self._compute_wait(key, cap, refill)
         if wait > 0:
             retry_after = max(1, int(wait + 0.5))
-            log.info("rate_limited", key=key, retry_in=round(wait, 2))
+            log.info("rate_limited", key=key, cap=cap, retry_in=round(wait, 2))
             return JSONResponse(
                 status_code=429,
                 content={
@@ -169,7 +213,7 @@ class SimpleRateLimitMiddleware(BaseHTTPMiddleware):
             )
         return await call_next(request)
 
-    async def _compute_wait(self, key: str) -> float:
+    async def _compute_wait(self, key: str, cap: int, refill: float) -> float:
         # Try Redis first; fall back to in-memory if unreachable.
         if self._redis_url and not self._redis_failed:
             try:
@@ -180,7 +224,7 @@ class SimpleRateLimitMiddleware(BaseHTTPMiddleware):
                     self._lua_sha = await self._redis.script_load(_LUA_TOKEN_BUCKET)
                 res = await self._redis.evalsha(
                     self._lua_sha, 1, key,
-                    self._cap, self._refill, time.time(),
+                    cap, refill, time.time(),
                 )
                 return float(res)
             except Exception as exc:                                    # noqa: BLE001
@@ -191,14 +235,14 @@ class SimpleRateLimitMiddleware(BaseHTTPMiddleware):
                     log.warning("rate_limit_redis_unavailable", error=str(exc))
                 self._redis_failed = True
                 self._redis = None
-        return self._inmem_wait(key)
+        return self._inmem_wait(key, cap)
 
-    def _inmem_wait(self, key: str) -> float:
+    def _inmem_wait(self, key: str, cap: int) -> float:
         now = time.time()
         bucket = self._buckets[key]
         while bucket and now - bucket[0] > 60:
             bucket.popleft()
-        if len(bucket) >= self._cap:
+        if len(bucket) >= cap:
             # Wait until the oldest timestamp falls out of the 60s window.
             return max(0.0, 60.0 - (now - bucket[0]))
         bucket.append(now)

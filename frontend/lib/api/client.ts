@@ -83,11 +83,32 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   });
   if (!res.ok) {
     let detail = res.statusText;
+    let code: string | undefined;
     try {
       const body = await res.json();
+      // Pull out a structured `code` if the backend sent one (used today
+      // for "no_membership" — see app/core/security.py). Plain detail
+      // strings still flow through formatDetail() unchanged.
+      const innerDetail =
+        body && typeof body === 'object' ? (body as { detail?: unknown }).detail : undefined;
+      if (innerDetail && typeof innerDetail === 'object' && 'code' in (innerDetail as object)) {
+        code = String((innerDetail as { code?: unknown }).code ?? '');
+      }
       detail = formatDetail(body) || res.statusText;
     } catch {
       try { detail = await res.text(); } catch { /* ignore */ }
+    }
+    // 403 + no_membership → bounce to the dedicated landing page so the
+    // signed-in-but-unaffiliated user sees something useful instead of a
+    // generic error banner. Done here because middleware can't intercept
+    // proxy responses, and we need to catch this everywhere the API client
+    // is called (every page).
+    if (
+      res.status === 403 && code === 'no_membership'
+      && typeof window !== 'undefined'
+      && !window.location.pathname.startsWith('/no-access')
+    ) {
+      window.location.replace('/no-access');
     }
     throw new ApiError(res.status, detail || 'Unknown error', url);
   }

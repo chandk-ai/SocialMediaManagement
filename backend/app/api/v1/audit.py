@@ -48,3 +48,22 @@ async def list_audit_logs(
         since=since,
     )
     return {"events": rows}
+
+
+@router.get("/audit-logs/verify")
+async def verify_audit_chain(
+    limit: int = Query(5000, ge=1, le=50000),
+    user: Principal = Depends(current_user),
+    svc: AuditLogService | None = Depends(get_audit_log_service),
+) -> dict:
+    """Verify the org's tamper-evident audit chain.
+
+    Returns ``chain_intact: true`` when every row's recomputed hash matches
+    the stored ``row_hash`` AND each row's ``prev_hash`` matches the prior
+    row's ``row_hash`` in walk order. A break indicates the row (or one
+    before it) was modified or deleted directly in the database, bypassing
+    the application. Useful for SOC2 / compliance review."""
+    if not user.role.can_admin():
+        raise HTTPException(status_code=403, detail="Admin role required")
+    s = _require(svc)
+    return await s.verify_chain(OrgId(UUID(user.org_id)), limit=limit)

@@ -6,7 +6,7 @@ services:
     runtime: docker
     rootDir: backend
     plan: starter                       # bump to standard / pro for prod
-    healthCheckPath: /api/v1/health
+    healthCheckPath: /api/v1/ready
     envVars:
       - key: ENV
         value: prod

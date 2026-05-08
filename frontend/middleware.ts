@@ -8,7 +8,7 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { getMiddlewareSupabase } from '@/lib/auth/supabase-server';
 
 const PUBLIC = [
-  '/login', '/signup',
+  '/login', '/signup', '/no-access',
   '/api/auth',                  // NextAuth callback paths (Okta SSO)
   '/_next', '/favicon.ico',
   '/api/proxy/health',          // backend health proxy (anonymous OK)

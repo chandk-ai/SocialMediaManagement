@@ -17,7 +17,7 @@ from jose import JWTError, jwt
 
 from app.core.config import Settings, get_settings
 from app.domain.entities.user import Role
-from app.domain.exceptions import AuthError
+from app.domain.exceptions import AuthError, NoMembershipError
 from app.infrastructure.observability.sentry import set_request_context
 
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -112,10 +112,11 @@ async def get_current_user(
             sa = SupabaseAuth(settings)
             raw = await sa.verify(creds.credentials)
             mapped = SupabaseAuth.map_claims(raw)
-            # Email-claim auto-join — when the JWT only carries the
-            # placeholder org_id, look up the local membership (or claim
-            # a pending invitation) so the user lands in the right org.
-            # See app/services/team.py for the full resolution order.
+            # Email-claim auto-join — when the JWT doesn't carry an org_id
+            # in app_metadata, resolve via the local membership table or
+            # a pending invitation. Bootstraps the very first user as
+            # admin; refuses subsequent unclaimed signups (NoMembershipError
+            # → 403). See app/services/team.py for the full resolution.
             mapped = await _maybe_resolve_via_team(mapped)
             principal = Principal(
                 subject=mapped["subject"], email=mapped["email"], name=mapped["name"],
@@ -127,6 +128,13 @@ async def get_current_user(
         claims = await verify_token(creds.credentials, settings)
     except AuthError as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+    except NoMembershipError as exc:
+        # Authenticated, but no workspace access yet — surface a clean 403
+        # with a code the frontend can branch on.
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "no_membership", "message": str(exc)},
+        ) from exc
 
     role_claim = claims.get("role") or "viewer"
     principal = Principal(
@@ -141,42 +149,70 @@ async def get_current_user(
     return principal
 
 
-_PLACEHOLDER_ORG_ID = "00000000-0000-0000-0000-000000000001"
-
-
 async def _maybe_resolve_via_team(mapped: dict[str, Any]) -> dict[str, Any]:
-    """When Supabase's ``app_metadata`` doesn't carry an explicit org_id, ask
-    the team service to resolve it via supabase_uid → email → pending invite.
+    """Translate a verified Supabase JWT into a fully-populated mapped-claims
+    dict, attaching the org_id + role from our local membership table.
 
-    Returns the (possibly augmented) mapped-claims dict so the caller can
-    construct the Principal as before. No-op when the team service isn't
-    available (memory backend, etc.) or when the JWT already has a real
-    org_id.
+    Resolution order:
+      1. ``app_metadata.org_id`` already present (provisioned via Supabase
+         admin) → use as-is.
+      2. ``team.resolve_principal()`` matches a local user row, a pending
+         invitation, or backfills ``supabase_uid`` on a pre-provisioned row.
+      3. Bootstrap path: if no org exists yet in the deployment, the
+         caller becomes the admin of a freshly-created org (one-time).
+      4. None of the above → raise :class:`NoMembershipError`. The auth
+         dependency turns this into a 403 with a clear message; the
+         frontend renders an "ask your admin to invite you" screen.
+
+    The previous implementation silently bucketed unclaimed users into a
+    shared placeholder org — a multi-tenant foot-gun. Removed.
     """
-    org = mapped.get("org_id")
-    if org and org != _PLACEHOLDER_ORG_ID:
+    if mapped.get("org_id"):
         return mapped
+
+    # In-memory mode (no Supabase / Postgres backend) — the team service
+    # isn't available. Allow the request through with a synthetic dev org
+    # so dev / tests keep working without a database.
     try:
-        # Lazy import to avoid a deps.py → security.py cycle at import time.
         from app.api.deps import get_team_service
         team = get_team_service()
-        if team is None:
-            return mapped
+    except Exception:                                                   # noqa: BLE001
+        team = None
+    if team is None:
+        return {**mapped, "org_id": "00000000-0000-0000-0000-000000000001"}
+
+    try:
         resolved = await team.resolve_principal(
             supabase_uid=mapped["subject"],
             email=mapped.get("email", ""),
             display_name=mapped.get("name", ""),
         )
     except Exception as exc:                                            # noqa: BLE001
-        # Auth must never crash on a team-service failure — fall back to
-        # the placeholder so the user at least sees the app (read-only).
-        from app.core.logging import get_logger
-        get_logger(__name__).warning(
-            "team_resolve_failed_fallback_placeholder", error=str(exc),
-        )
-        return mapped
+        # Genuine DB outage — fail open is worse than failing closed for
+        # auth, so surface the error rather than guessing an org.
+        raise AuthError(f"membership lookup failed: {exc}") from exc
+
     if resolved is None:
-        return mapped
+        # Try the bootstrap path: very first user on a fresh deployment
+        # becomes admin of a freshly-created org. After that, unclaimed
+        # signups are refused — the system is invitation-based.
+        try:
+            resolved = await team.bootstrap_first_user(
+                supabase_uid=mapped["subject"],
+                email=mapped.get("email", ""),
+                display_name=mapped.get("name", ""),
+            )
+        except Exception as exc:                                        # noqa: BLE001
+            raise AuthError(f"bootstrap failed: {exc}") from exc
+
+    if resolved is None:
+        from app.domain.exceptions import NoMembershipError
+        raise NoMembershipError(
+            "Your sign-in worked, but you don't have access to any "
+            "workspace yet. Ask an admin in your organisation to invite "
+            f"{mapped.get('email') or 'your email'} via Settings → Team.",
+        )
+
     return {
         **mapped,
         "org_id": resolved.org_id,

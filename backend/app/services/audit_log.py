@@ -87,6 +87,68 @@ class AuditLogService:
             )
 
     # ── reads ───────────────────────────────────────────────────────────
+    async def verify_chain(
+        self, org_id: OrgId | str, *, limit: int = 5000,
+    ) -> dict[str, Any]:
+        """Walk the org's append-only audit chain and confirm each row's
+        ``row_hash`` matches the recomputed value from the same canonical
+        inputs. Returns a summary suitable for compliance review.
+
+        ``smms.audit_log_verified`` (defined in migration 008) does the
+        recompute in SQL using pgcrypto's digest(), so this method is a
+        thin reporter — it doesn't reimplement the hash in Python (which
+        would be a second source of truth that could disagree)."""
+        rows: list[dict[str, Any]] = []
+        ok_count = 0
+        bad: list[dict[str, Any]] = []
+        prev_link_ok = True
+        prior_hash: str | None = None
+        async with self._sm() as s:
+            result = await s.execute(
+                text(
+                    "SELECT id, occurred_at, action, prev_hash, row_hash, "
+                    "       expected_row_hash "
+                    "FROM smms.audit_log_verified "
+                    "WHERE org_id = :org_id "
+                    "ORDER BY occurred_at, id "
+                    "LIMIT :limit"
+                ),
+                {"org_id": UUID(str(org_id)), "limit": int(limit)},
+            )
+            rows = list(result.mappings())
+
+        for r in rows:
+            row_hash = r["row_hash"]
+            expected = r["expected_row_hash"]
+            row_ok = row_hash == expected
+            link_ok = (
+                prior_hash is None
+                or (r["prev_hash"] or "") == prior_hash
+            )
+            if row_ok and link_ok:
+                ok_count += 1
+            else:
+                bad.append({
+                    "id": str(r["id"]),
+                    "occurred_at": r["occurred_at"].isoformat() if r["occurred_at"] else "",
+                    "action": r["action"],
+                    "row_hash_ok": row_ok,
+                    "link_ok": link_ok,
+                })
+                prev_link_ok = False
+            prior_hash = row_hash
+
+        return {
+            "total": len(rows),
+            "ok": ok_count,
+            "tampered": len(bad),
+            "chain_intact": prev_link_ok and not bad,
+            "first_break": bad[0] if bad else None,
+            # Cap the breaks list so a chain that's gone wrong everywhere
+            # doesn't return megabytes of JSON.
+            "breaks": bad[:25],
+        }
+
     async def list_recent(
         self,
         org_id: OrgId | str,

@@ -64,6 +64,11 @@ export default function AuditPage() {
 
   // Real audit log first.
   const { data: audit, error: auditErr } = useApi<AuditResponse>('/audit-logs?limit=500&days=60');
+  // Tamper-evidence chain status (admin-only — backend 403s for non-admins,
+  // useApi will surface that via SWR error and we just hide the badge).
+  const { data: chain } = useApi<{
+    total: number; ok: number; tampered: number; chain_intact: boolean;
+  }>('/audit-logs/verify?limit=1000');
 
   // Synthetic fallback — used only when the real audit endpoint isn't
   // available (503 in memory mode, network error, or empty result on a
@@ -134,9 +139,23 @@ export default function AuditPage() {
           <Card>
             <div className="flex items-start justify-between gap-3 flex-wrap">
               <div>
-                <CardTitle>Activity timeline</CardTitle>
+                <CardTitle className="flex items-center gap-2">
+                  Activity timeline
+                  {chain && chain.chain_intact && chain.total > 0 && (
+                    <Badge tone="success">
+                      ✓ chain verified · {chain.ok}/{chain.total}
+                    </Badge>
+                  )}
+                  {chain && !chain.chain_intact && (
+                    <Badge tone="danger">
+                      ⚠ chain break · {chain.tampered} suspect row{chain.tampered === 1 ? '' : 's'}
+                    </Badge>
+                  )}
+                </CardTitle>
                 <CardDescription>
-                  Append-only log of state-changing events.
+                  Append-only log of state-changing events. Each row is hash-chained to its
+                  predecessor — direct DB modification or deletion breaks the chain and is
+                  visible above.
                   {auditErr && (
                     <span className="block text-amber-700 mt-1">
                       Live audit log unavailable — showing synthesized events.

@@ -22,7 +22,9 @@ services:
     runtime: docker
     rootDir: backend
     plan: starter
-    healthCheckPath: /api/v1/health
+    # Readiness probe — pings Postgres + Redis before reporting healthy.
+    # Render takes the instance out of rotation on 503 without killing it.
+    healthCheckPath: /api/v1/ready
     envVars:
       - key: ENV
         value: prod

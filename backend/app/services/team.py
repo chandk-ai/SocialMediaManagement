@@ -187,8 +187,75 @@ class TeamService:
                         display_name=display_name or email_l,
                     )
 
-        # 4. no match — caller falls back to placeholder behaviour.
+        # 4. no match — caller decides whether to bootstrap or refuse.
         return None
+
+    async def bootstrap_first_user(
+        self,
+        *,
+        supabase_uid: str,
+        email: str,
+        display_name: str,
+    ) -> ResolvedPrincipal | None:
+        """First-sign-in path for a brand-new deployment.
+
+        When ``smms.organizations`` is empty AND no pending invitation
+        exists, the very first user becomes the admin of a freshly-created
+        org. This is the standard SaaS "first-run" pattern and is what
+        lets you seed a workspace without touching SQL.
+
+        Once any org exists, this method returns ``None`` — subsequent
+        unclaimed sign-ins are rejected by the auth path (the policy is
+        invitation-based after bootstrap so prod can't accidentally pool
+        every random Supabase signup into one tenant).
+        """
+        email_l = (email or "").lower().strip()
+        if not email_l:
+            return None
+        async with self._sm() as s:
+            org_count = (await s.execute(
+                text("SELECT count(*) AS n FROM smms.organizations"),
+            )).scalar_one()
+            if org_count and int(org_count) > 0:
+                return None
+            new_org_id = uuid4()
+            new_user_id = uuid4()
+            slug = email_l.split("@", 1)[0][:40] or "workspace"
+            await s.execute(
+                text(
+                    "INSERT INTO smms.organizations (id, name, slug) "
+                    "VALUES (:id, :name, :slug)"
+                ),
+                {"id": new_org_id, "name": display_name or email_l, "slug": slug},
+            )
+            await s.execute(
+                text(
+                    "INSERT INTO smms.users "
+                    "(id, org_id, email, display_name, role, supabase_uid) "
+                    "VALUES (:id, :org_id, :email, :name, 'admin', :uid)"
+                ),
+                {
+                    "id": new_user_id,
+                    "org_id": new_org_id,
+                    "email": email_l,
+                    "name": display_name or email_l,
+                    "uid": UUID(supabase_uid),
+                },
+            )
+            await s.commit()
+            log.info(
+                "team_bootstrap_first_user",
+                org_id=str(new_org_id),
+                user_id=str(new_user_id),
+                email=email_l,
+            )
+            return ResolvedPrincipal(
+                user_id=str(new_user_id),
+                org_id=str(new_org_id),
+                role=Role.ADMIN,
+                email=email_l,
+                display_name=display_name or email_l,
+            )
 
     # ── invitations ─────────────────────────────────────────────────────
     async def list_invitations(self, org_id: OrgId) -> list[InvitationRow]:
