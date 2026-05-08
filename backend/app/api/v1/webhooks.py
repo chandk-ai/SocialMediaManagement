@@ -128,9 +128,13 @@ async def _handle_messaging_webhook(
     started: list[UUID] = []
     for ev in events:
         # If this message is a reply to a pending review, route it as a decision.
+        # actor_id distinguishes individual voters when the channel is a group
+        # (Telegram quorum mode). For 1:1 channels it's None and the review
+        # service falls back to the old "first decision wins" path.
         review, decision = await review_svc.apply_reply(
             channel=channel, sender=ev.sender,
             reply_text=ev.directive, in_reply_to=ev.in_reply_to,
+            actor_id=ev.actor_id, actor_handle=ev.actor_handle,
         )
         if review is not None:
             log.info("trigger_routed_to_review",

@@ -27,7 +27,7 @@ class TriggerEvent:
     is fed to the Planner agent so the run is shaped by the user's request.
     """
     trigger_id: str                # ID of the configured Trigger row
-    sender: str                    # phone / IG handle / email — used for allowlist + reply-to
+    sender: str                    # phone / IG handle / chat_id — used for allowlist + reply-to
     directive: str                 # the user's free-text instruction (or "")
     media_urls: list[str] = field(default_factory=list)
     occurred_at: datetime = field(default_factory=datetime.utcnow)
@@ -36,6 +36,13 @@ class TriggerEvent:
     # (e.g. WhatsApp button replies), `in_reply_to` carries the original
     # outbound message id so we can correlate to a ReviewSession.
     in_reply_to: str | None = None
+    # In *group* contexts (e.g. a Telegram group of approvers), `sender` is
+    # the chat id while `actor_id` identifies the individual user who took
+    # the action. Used by the quorum-approval feature so we can dedupe and
+    # attribute votes per voter. ``None`` for 1:1 channels where the two
+    # are the same.
+    actor_id: str | None = None
+    actor_handle: str | None = None    # optional human-readable label (@username)
 
 
 class TriggerAdapter(ABC):

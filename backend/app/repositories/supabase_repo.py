@@ -522,6 +522,18 @@ def _trigger_to_orm(d: Trigger) -> TriggerORM:
 
 
 def _review_to_domain(orm: ReviewSessionORM) -> ReviewSession:
+    from app.domain.entities.review_session import QuorumVote
+    raw_votes = list(orm.quorum_votes or [])
+    votes: list[QuorumVote] = []
+    for v in raw_votes:
+        if not isinstance(v, dict):
+            continue
+        votes.append(QuorumVote(
+            actor_id=str(v.get("actor_id", "")),
+            actor_handle=v.get("actor_handle"),
+            kind=str(v.get("kind", "")),
+            at=str(v.get("at", "")),
+        ))
     return ReviewSession(
         id=ReviewId(orm.id), org_id=OrgId(orm.org_id),
         workflow_id=WorkflowId(orm.workflow_id), run_id=RunId(orm.run_id),
@@ -532,6 +544,8 @@ def _review_to_domain(orm: ReviewSessionORM) -> ReviewSession:
         decision_at=orm.decision_at,
         feedback=orm.feedback, expires_at=orm.expires_at,
         created_at=orm.created_at,
+        quorum_required=int(getattr(orm, "quorum_required", 1) or 1),
+        quorum_votes=votes,
     )
 
 
@@ -543,6 +557,12 @@ def _review_to_orm(d: ReviewSession) -> ReviewSessionORM:
         sent_message_ref=d.sent_message_ref,
         decision_at=d.decision_at, feedback=d.feedback,
         expires_at=d.expires_at,
+        quorum_required=int(d.quorum_required or 1),
+        quorum_votes=[
+            {"actor_id": v.actor_id, "actor_handle": v.actor_handle,
+             "kind": v.kind, "at": v.at}
+            for v in d.quorum_votes
+        ],
     )
 
 

@@ -86,6 +86,12 @@ class TelegramTrigger(TriggerAdapter):
             return None
         text = msg.get("text") or msg.get("caption") or ""
         in_reply_to = (msg.get("reply_to_message") or {}).get("message_id")
+        from_user = msg.get("from") or {}
+        actor_id = str(from_user.get("id")) if from_user.get("id") is not None else None
+        actor_handle = (
+            from_user.get("username")
+            and f"@{from_user['username']}"
+        ) or None
         return TriggerEvent(
             trigger_id=payload.get("trigger_id", ""),
             sender=chat_id,
@@ -93,6 +99,8 @@ class TelegramTrigger(TriggerAdapter):
             media_urls=self._extract_media(msg),
             raw=msg,
             in_reply_to=str(in_reply_to) if in_reply_to is not None else None,
+            actor_id=actor_id,
+            actor_handle=actor_handle,
         )
 
     @staticmethod
@@ -101,13 +109,24 @@ class TelegramTrigger(TriggerAdapter):
         data = cq.get("data", "")
         message = cq.get("message") or {}
         original_msg_id = message.get("message_id")
+        # In a group chat, the chat is the group; the tapper is `from`. Both
+        # matter — chat_id is the address we reply to, actor_id is *who* tapped.
         chat_id = str((message.get("chat") or cq.get("from") or {}).get("id", ""))
+        from_user = cq.get("from") or {}
+        actor_id = str(from_user.get("id")) if from_user.get("id") is not None else None
+        actor_handle = (
+            from_user.get("username") and f"@{from_user['username']}"
+        ) or (
+            from_user.get("first_name") or None
+        )
         return TriggerEvent(
             trigger_id=payload.get("trigger_id", ""),
             sender=chat_id,
             directive=_button_to_text(data),
             raw=cq,
             in_reply_to=str(original_msg_id) if original_msg_id is not None else None,
+            actor_id=actor_id,
+            actor_handle=actor_handle,
         )
 
     @staticmethod

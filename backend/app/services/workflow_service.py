@@ -197,11 +197,14 @@ class WorkflowService:
     ) -> WorkflowRun:
         """Entry-point used by webhook handlers — kicks off a run with the
         sender's free-text instruction (e.g. an inbound WhatsApp message)."""
+        # Quorum lives on the trigger's config; default 1 = first-tap-wins.
+        quorum = int((trigger.config or {}).get("quorum_required", 1) or 1)
         return await self._execute(
             org_id=trigger.org_id, workflow_id=trigger.workflow_id,
             directive=directive, trigger_id=trigger.id, initiator=initiator,
             review_channel=trigger.review_channel,
             review_recipient=trigger.review_recipient or initiator,
+            quorum_required=max(1, quorum),
         )
 
     async def resume_after_review(
@@ -256,6 +259,7 @@ class WorkflowService:
         initiator: str | None = None,
         review_channel: str | None = None,
         review_recipient: str | None = None,
+        quorum_required: int = 1,
     ) -> WorkflowRun:
         wf = await self.repo.get(org_id, workflow_id)
         if not wf:
@@ -374,6 +378,7 @@ class WorkflowService:
                     run=run, posts=posts, drafts=final_state.drafts,
                     channel=review_channel or "in_app",
                     recipient=review_recipient or "",
+                    quorum_required=quorum_required,
                 )
                 # Run is paused — we do NOT mark SUCCEEDED.
             else:
@@ -425,6 +430,7 @@ class WorkflowService:
     async def _open_review_session(
         self, *, run: WorkflowRun, posts: list[Post], drafts: list[DraftPost],
         channel: str, recipient: str,
+        quorum_required: int = 1,
     ) -> ReviewSession | None:
         if self.review_repo is None or not recipient:
             log.info("review_skipped_no_repo_or_recipient",
@@ -439,6 +445,7 @@ class WorkflowService:
         review = ReviewSession.create(
             org_id=run.org_id, workflow_id=wf_id, run_id=run.id,
             channel=channel, recipient=recipient, drafts_snapshot=snapshot,
+            quorum_required=max(1, int(quorum_required or 1)),
         )
         await self.review_repo.add(review)
         # The dispatch (sending the message via WhatsApp/IG/etc.) is handled

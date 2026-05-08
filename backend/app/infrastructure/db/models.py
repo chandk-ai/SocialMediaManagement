@@ -194,6 +194,9 @@ class ReviewSessionORM(Base):
     feedback: Mapped[str | None] = mapped_column(Text)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Group-quorum support — see migrations/006_review_quorum.sql.
+    quorum_required: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    quorum_votes: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
 
 
 class PostORM(Base):

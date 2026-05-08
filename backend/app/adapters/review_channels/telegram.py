@@ -84,19 +84,34 @@ class TelegramReviewChannel(ReviewChannel):
             f"*{_md_escape(d.get('platform_name',''))}*\n{(_md_escape(d.get('text') or ''))[:800]}"
             for d in message.drafts[:3]
         )
-        text = f"*{_md_escape(message.headline)}*\n\n{preview}"[:4000]
+        # Surface the quorum requirement up-front so reviewers know whether
+        # one tap is enough or whether they're voting in a group. The
+        # message.metadata dict is populated by ReviewService before send.
+        meta = getattr(message, "metadata", None) or {}
+        quorum = int(meta.get("quorum_required", 1) or 1)
+        header = _md_escape(message.headline)
+        if quorum > 1:
+            header += f"\n_Quorum: any {quorum} ✅ to publish · any 1 ❌ to veto_"
+        text = f"*{header}*\n\n{preview}"[:4000]
         return {
             "chat_id": recipient,
             "text": text,
             "parse_mode": "Markdown",
             "reply_markup": {
                 "inline_keyboard": [[
-                    {"text": "✅ Approve", "callback_data": "smms_approve"},
+                    {"text": _approve_label(quorum, 0), "callback_data": "smms_approve"},
                     {"text": "✏️ Revise",  "callback_data": "smms_revise"},
                     {"text": "❌ Reject",  "callback_data": "smms_reject"},
                 ]],
             },
         }
+
+
+def _approve_label(quorum: int, current: int) -> str:
+    """Approve button shows 0/N when quorum > 1, plain ✅ otherwise."""
+    if quorum > 1:
+        return f"✅ Approve ({current}/{quorum})"
+    return "✅ Approve"
 
 
 def _md_escape(s: str) -> str:

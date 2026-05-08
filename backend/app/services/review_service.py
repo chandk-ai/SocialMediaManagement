@@ -45,6 +45,9 @@ class ReviewService:
         message = ReviewMessage(
             headline=headline or "Please review this draft before publishing",
             drafts=drafts,
+            # Surface the quorum so the channel adapter (e.g. Telegram) can
+            # render "any 3 ✅ to publish" in the message text.
+            metadata={"quorum_required": session.quorum_required},
         )
         ref = await channel.send_for_review(session.recipient, message)
         session.sent_message_ref = ref
@@ -55,7 +58,18 @@ class ReviewService:
     async def apply_reply(
         self, *, channel: str, sender: str, reply_text: str,
         in_reply_to: str | None = None,
+        actor_id: str | None = None,
+        actor_handle: str | None = None,
     ) -> tuple[ReviewSession | None, ReviewDecision]:
+        """Apply a reviewer reply.
+
+        For 1:1 channels (WhatsApp DM, Instagram DM, email) the first
+        decision wins — same as before. For *group* channels (Telegram
+        group with multiple admins, identified by ``review.quorum_required
+        > 1``) every tap is recorded as a vote and the run only resumes
+        once the quorum is met. ``actor_id`` is the per-user identity
+        within the channel (Telegram from.id, etc.) — required for
+        quorum dedupe."""
         # Prefer threaded matching when the channel supplies an in_reply_to id
         review = None
         if in_reply_to:
@@ -67,7 +81,14 @@ class ReviewService:
             log.info("review_reply_unmatched", channel=channel, sender=sender,
                      decision=decision.kind.value)
             return None, decision
-        await self._apply(review, decision)
+        # Quorum path — only kicks in when the session was created with
+        # quorum_required > 1 AND the channel gave us an actor_id.
+        if review.quorum_required > 1 and actor_id:
+            await self._apply_with_quorum(
+                review, decision, actor_id=actor_id, actor_handle=actor_handle,
+            )
+        else:
+            await self._apply(review, decision)
         return review, decision
 
     async def apply_decision_via_api(
@@ -90,6 +111,78 @@ class ReviewService:
             review.reject(decision.raw_text)
         else:
             return                                          # UNKNOWN — leave PENDING
+        await self.repo.update(review)
+
+    async def _apply_with_quorum(
+        self,
+        review: ReviewSession,
+        decision: ReviewDecision,
+        *,
+        actor_id: str,
+        actor_handle: str | None,
+    ) -> None:
+        """Group-channel decision flow.
+
+        Vote rules:
+          • Reject vote → instant veto, no quorum needed.
+          • Revise vote → instant pull-back; agents revise, new round opens.
+          • Approve vote → counts toward ``quorum_required``; promotes the
+            session only when the threshold is reached.
+        Per-actor dedupe: tapping the same button twice is a no-op for the
+        tally; switching from Approve → Revise updates that actor's vote.
+        """
+        kind_map = {
+            DecisionKind.APPROVE: "approve",
+            DecisionKind.REVISE:  "revise",
+            DecisionKind.REJECT:  "reject",
+        }
+        vote_kind = kind_map.get(decision.kind)
+        if vote_kind is None:
+            return                                          # UNKNOWN button
+        tally = review.record_vote(
+            actor_id=actor_id, actor_handle=actor_handle, kind=vote_kind,
+        )
+        log.info(
+            "review_vote_recorded",
+            review_id=str(review.id), actor_id=actor_id,
+            kind=vote_kind, tally=f"{tally.approve}/{tally.quorum_required}",
+        )
+        # Audit-log every vote — useful for editorial-board accountability.
+        try:
+            from app.api.deps import get_audit_log_service
+            audit = get_audit_log_service()
+            if audit is not None:
+                await audit.record(
+                    org_id=review.org_id,
+                    actor_type="reviewer",
+                    actor_id=None,           # actor_id here is a Telegram id, not a UUID
+                    action=f"review.vote.{vote_kind}",
+                    resource_type="review_session",
+                    resource_id=review.id,
+                    after={
+                        "actor_telegram_id": actor_id,
+                        "actor_handle": actor_handle,
+                        "tally": {
+                            "approve": tally.approve,
+                            "revise": tally.revise,
+                            "reject": tally.reject,
+                            "quorum_required": tally.quorum_required,
+                        },
+                    },
+                )
+        except Exception:                                   # noqa: BLE001
+            pass
+
+        # Decide whether the session has hit a terminal state.
+        if tally.reject_wins:
+            review.reject(f"Vetoed by {actor_handle or actor_id}")
+        elif tally.revise_wins:
+            review.request_revision(
+                decision.feedback or f"Revisions requested by {actor_handle or actor_id}",
+            )
+        elif tally.approve_wins:
+            review.approve()
+        # else: still pending — wait for more taps.
         await self.repo.update(review)
 
     async def acknowledge(self, review: ReviewSession, message: str) -> None:

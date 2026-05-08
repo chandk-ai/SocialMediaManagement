@@ -93,6 +93,7 @@ function Step1Form({
   const [displayName, setDisplayName] = useState('Telegram trigger');
   const [reviewChannel, setReviewChannel] = useState('telegram');
   const [allowedChats, setAllowedChats] = useState('');
+  const [quorumRequired, setQuorumRequired] = useState<number>(1);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -122,6 +123,10 @@ function Step1Form({
           bot_token: botToken.trim(),
           secret_token: secretToken,
           allowed_chat_ids: allowed,
+          // Quorum > 1 turns the review session into a group-vote flow:
+          // any reject is a hard veto, any revise pulls the draft back,
+          // and approve needs `quorum_required` distinct votes to win.
+          quorum_required: Math.max(1, Math.floor(quorumRequired || 1)),
         },
         allowed_senders: allowed,
         review_channel: reviewChannel || null,
@@ -193,7 +198,7 @@ function Step1Form({
         </p>
       </div>
 
-      <div className="md:col-span-2">
+      <div>
         <label className="block text-xs text-ink-500 mb-1">Review channel</label>
         <select
           className="input"
@@ -206,7 +211,25 @@ function Step1Form({
         </select>
         <p className="mt-1 text-[11px] text-ink-500">
           Where drafts come back for approval. Default <strong>Telegram</strong> means the same bot
-          will message you back with ✅ Approve / ✏️ Revise / ❌ Reject buttons.
+          messages back with ✅ Approve / ✏️ Revise / ❌ Reject buttons.
+        </p>
+      </div>
+
+      <div>
+        <label className="block text-xs text-ink-500 mb-1">
+          Approvals required <span className="text-ink-400">(quorum)</span>
+        </label>
+        <Input
+          type="number"
+          min={1}
+          max={20}
+          value={quorumRequired}
+          onChange={e => setQuorumRequired(Number(e.target.value) || 1)}
+        />
+        <p className="mt-1 text-[11px] text-ink-500">
+          Set to <code>1</code> for first-tap-wins (DM use case). Higher values
+          turn the bot into an editorial-board vote: K-of-N must tap ✅ before
+          publishing, but any one ❌ is a hard veto.
         </p>
       </div>
 
