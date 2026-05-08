@@ -28,6 +28,37 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Coerce any error-body shape into a human-readable string. FastAPI's 422
+ * validation responses are arrays of objects (`[{type, loc, msg, input}]`);
+ * naively rendering them in JSX crashes React with "Objects are not valid as
+ * a React child". This flattens every shape we've seen into one string.
+ */
+function formatDetail(body: unknown): string {
+  if (body == null) return '';
+  if (typeof body === 'string') return body;
+  if (typeof body === 'object') {
+    const b = body as Record<string, unknown>;
+    if (typeof b.message === 'string') return b.message;
+    const detail = b.detail;
+    if (typeof detail === 'string') return detail;
+    if (Array.isArray(detail)) {
+      // Pydantic v2 validation error array → "field: msg; field: msg"
+      return detail
+        .map((e) => {
+          const obj = e as Record<string, unknown>;
+          const loc = Array.isArray(obj.loc) ? obj.loc.slice(1).join('.') : '';
+          const msg = typeof obj.msg === 'string' ? obj.msg : JSON.stringify(obj);
+          return loc ? `${loc}: ${msg}` : msg;
+        })
+        .join('; ');
+    }
+    if (detail && typeof detail === 'object') return JSON.stringify(detail);
+    try { return JSON.stringify(b); } catch { /* fall through */ }
+  }
+  return String(body);
+}
+
 async function getAccessToken(): Promise<string | null> {
   try {
     const supa = getSupabase();
@@ -54,7 +85,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     let detail = res.statusText;
     try {
       const body = await res.json();
-      detail = body?.detail || body?.message || JSON.stringify(body);
+      detail = formatDetail(body) || res.statusText;
     } catch {
       try { detail = await res.text(); } catch { /* ignore */ }
     }

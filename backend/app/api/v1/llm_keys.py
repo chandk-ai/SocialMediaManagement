@@ -1,4 +1,11 @@
-"""LLM API key management endpoints — org-scoped, encrypted at rest."""
+"""LLM API key management endpoints — org-scoped, encrypted at rest.
+
+Route order matters: ``/llm-keys/preferred`` MUST be declared before
+``/llm-keys/{provider}`` because FastAPI matches in declaration order, and
+``{provider}`` is greedy enough to swallow ``preferred``. Without this order
+``PUT /llm-keys/preferred`` ends up hitting ``set_key(provider="preferred")``
+with the wrong body shape, which 422s and crashes the frontend.
+"""
 from __future__ import annotations
 
 from uuid import UUID
@@ -32,6 +39,7 @@ def _require_svc(svc: LlmCredentialsService | None) -> LlmCredentialsService:
     return svc
 
 
+# ── reads ────────────────────────────────────────────────────────────────
 @router.get("/llm-keys")
 async def list_keys(
     user: Principal = Depends(current_user),
@@ -54,6 +62,22 @@ async def list_keys(
     }
 
 
+# ── writes — `preferred` MUST be declared before `{provider}` ───────────
+@router.put("/llm-keys/preferred")
+async def set_preferred(
+    body: PreferenceBody,
+    user: Principal = Depends(current_user),
+    svc: LlmCredentialsService | None = Depends(get_llm_credentials_service),
+) -> dict:
+    if not user.role.can_edit():
+        raise HTTPException(status_code=403, detail="Editor role required")
+    s = _require_svc(svc)
+    if body.provider and body.provider not in KNOWN_PROVIDERS:
+        raise HTTPException(status_code=400, detail=f"Unknown provider: {body.provider}")
+    await s.set_preferred(OrgId(UUID(user.org_id)), body.provider, body.model)
+    return {"ok": True, "provider": body.provider, "model": body.model}
+
+
 @router.put("/llm-keys/{provider}")
 async def set_key(
     provider: str,
@@ -61,6 +85,15 @@ async def set_key(
     user: Principal = Depends(current_user),
     svc: LlmCredentialsService | None = Depends(get_llm_credentials_service),
 ) -> dict:
+    if provider == "preferred":
+        # Belt-and-suspenders: if anything ever bypasses the route order,
+        # surface a clear 400 instead of the confusing "missing api_key" 422.
+        raise HTTPException(
+            status_code=400,
+            detail="Use PUT /llm-keys/preferred (with provider+model) to set the default LLM.",
+        )
+    if provider not in KNOWN_PROVIDERS:
+        raise HTTPException(status_code=400, detail=f"Unknown provider: {provider}")
     if not user.role.can_edit():
         raise HTTPException(status_code=403, detail="Editor role required")
     s = _require_svc(svc)
@@ -81,18 +114,3 @@ async def delete_key(
         raise HTTPException(status_code=403, detail="Editor role required")
     s = _require_svc(svc)
     await s.remove_key(OrgId(UUID(user.org_id)), provider)
-
-
-@router.put("/llm-keys/preferred")
-async def set_preferred(
-    body: PreferenceBody,
-    user: Principal = Depends(current_user),
-    svc: LlmCredentialsService | None = Depends(get_llm_credentials_service),
-) -> dict:
-    if not user.role.can_edit():
-        raise HTTPException(status_code=403, detail="Editor role required")
-    s = _require_svc(svc)
-    if body.provider and body.provider not in KNOWN_PROVIDERS:
-        raise HTTPException(status_code=400, detail=f"Unknown provider: {body.provider}")
-    await s.set_preferred(OrgId(UUID(user.org_id)), body.provider, body.model)
-    return {"ok": True, "provider": body.provider, "model": body.model}
