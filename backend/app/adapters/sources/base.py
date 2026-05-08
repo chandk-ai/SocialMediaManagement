@@ -35,3 +35,38 @@ class ContentSource(ABC):
 
     async def disconnect(self) -> None:
         return None
+
+    # ── CMS-mode hooks (Niche #3) ────────────────────────────────────────
+    # Default no-ops. Sources that act as the source-of-truth for posts
+    # (Notion, Airtable, Google Sheets) override these to write status
+    # back to the row after the workflow service publishes it. Sources
+    # that are read-only (RSS, web scraping) just inherit the no-ops.
+
+    @property
+    def is_cms(self) -> bool:
+        """True when this source's rows are publishable units, not just
+        reference material the planner reads. Subclasses flip this on
+        based on the user's config (e.g. Notion's ``cms_mode`` flag)."""
+        return False
+
+    async def mark_published(
+        self,
+        external_id: str,
+        *,
+        url: str | None = None,
+        platform: str | None = None,
+        published_at: datetime | None = None,
+    ) -> None:
+        """Called after a successful publish so the source can update the
+        row's status. Default no-op for read-only sources."""
+        return None
+
+    async def mark_failed(
+        self,
+        external_id: str,
+        *,
+        error: str,
+        platform: str | None = None,
+    ) -> None:
+        """Called when a publish fails terminally. Default no-op."""
+        return None

@@ -223,10 +223,15 @@ class TeamService:
         role: Role,
         invited_by: str | None,
     ) -> InvitationRow:
+        """``invited_by`` is the caller's auth identity — for Supabase that's
+        the auth.users UUID, which lives on ``smms.users.supabase_uid``, not
+        on ``smms.users.id``. The FK on ``org_invitations.invited_by``
+        points to ``smms.users.id``, so we resolve here. If we can't find a
+        local user row (e.g. the placeholder default org), we fall back to
+        ``NULL`` — the column is nullable on purpose."""
         email_l = (email or "").lower().strip()
         if "@" not in email_l:
             raise ValueError("Email is required and must contain '@'.")
-        invited_by_uuid = self._maybe_uuid(invited_by)
         # Surface a clean error if the email already belongs to a member.
         async with self._sm() as s:
             existing_member = (await s.execute(
@@ -238,6 +243,10 @@ class TeamService:
             )).first()
             if existing_member:
                 raise ValueError(f"{email_l} is already a member of this org.")
+
+            # Resolve invited_by: try smms.users.id first, then supabase_uid.
+            inviter_local_id = await self._resolve_local_user_id(s, org_id, invited_by)
+
             new_id = uuid4()
             await s.execute(
                 text(
@@ -250,7 +259,7 @@ class TeamService:
                     "org_id": UUID(str(org_id)),
                     "email": email_l,
                     "role": role.value,
-                    "inviter": invited_by_uuid,
+                    "inviter": inviter_local_id,
                 },
             )
             await s.commit()
@@ -380,3 +389,53 @@ class TeamService:
             return UUID(str(s))
         except (ValueError, TypeError):
             return None
+
+    async def resolve_local_user_id(
+        self, org_id: OrgId, identity: str | None,
+    ) -> UUID | None:
+        """Public wrapper — opens its own session. Use from API routes that
+        need to translate ``Principal.subject`` (Supabase UID) to the
+        ``smms.users.id`` foreign key the DB enforces."""
+        async with self._sm() as s:
+            return await self._resolve_local_user_id(s, org_id, identity)
+
+    async def _resolve_local_user_id(
+        self,
+        session,
+        org_id: OrgId,
+        identity: str | None,
+    ) -> UUID | None:
+        """Map an auth identity (Supabase UID, dev-token subject, or already-
+        local users.id) to the row's primary key in ``smms.users``.
+
+        Order of attempts:
+          1. ``smms.users.id`` matches directly  → caller already passed local id.
+          2. ``smms.users.supabase_uid`` matches → caller passed the auth UID.
+          3. Nothing matches → return None and let the caller insert NULL.
+
+        Scoped to the org_id so the FK relationship stays tenant-correct.
+        """
+        candidate = self._maybe_uuid(identity)
+        if candidate is None:
+            return None
+        # Direct id match — already a local users.id.
+        row = (await session.execute(
+            text(
+                "SELECT id FROM smms.users "
+                "WHERE id = :uid AND org_id = :org_id LIMIT 1"
+            ),
+            {"uid": candidate, "org_id": UUID(str(org_id))},
+        )).first()
+        if row:
+            return row.id
+        # Supabase UID match — translate.
+        row = (await session.execute(
+            text(
+                "SELECT id FROM smms.users "
+                "WHERE supabase_uid = :uid AND org_id = :org_id LIMIT 1"
+            ),
+            {"uid": candidate, "org_id": UUID(str(org_id))},
+        )).first()
+        if row:
+            return row.id
+        return None

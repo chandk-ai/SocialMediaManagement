@@ -13,11 +13,17 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
-from app.api.deps import current_user, get_audit_log_service, get_llm_credentials_service
+from app.api.deps import (
+    current_user,
+    get_audit_log_service,
+    get_llm_credentials_service,
+    get_team_service,
+)
 from app.core.security import Principal
 from app.domain.value_objects.ids import OrgId
 from app.services.audit_log import AuditLogService
 from app.services.llm_credentials import KNOWN_PROVIDERS, LlmCredentialsService
+from app.services.team import TeamService
 
 router = APIRouter()
 
@@ -63,6 +69,21 @@ async def list_keys(
     }
 
 
+async def _audit_actor_id(
+    user: Principal, team: TeamService | None,
+) -> UUID | None:
+    """Translate ``Principal.subject`` (Supabase auth UID) to the local
+    ``smms.users.id`` so audit_log.actor_id joins cleanly. Falls back to
+    None when no local row exists yet — better than logging a foreign
+    UUID that won't match anything."""
+    if team is None:
+        return None
+    try:
+        return await team.resolve_local_user_id(OrgId(UUID(user.org_id)), user.subject)
+    except Exception:                                              # noqa: BLE001
+        return None
+
+
 # ── writes — `preferred` MUST be declared before `{provider}` ───────────
 @router.put("/llm-keys/preferred")
 async def set_preferred(
@@ -70,6 +91,7 @@ async def set_preferred(
     user: Principal = Depends(current_user),
     svc: LlmCredentialsService | None = Depends(get_llm_credentials_service),
     audit: AuditLogService | None = Depends(get_audit_log_service),
+    team: TeamService | None = Depends(get_team_service),
 ) -> dict:
     if not user.role.can_edit():
         raise HTTPException(status_code=403, detail="Editor role required")
@@ -83,7 +105,7 @@ async def set_preferred(
             action="llm_key.set_preferred",
             resource_type="llm_provider",
             resource_id=None,
-            actor_id=user.subject if _is_uuid(user.subject) else None,
+            actor_id=await _audit_actor_id(user, team),
             after={"provider": body.provider, "model": body.model},
         )
     return {"ok": True, "provider": body.provider, "model": body.model}
@@ -96,6 +118,7 @@ async def set_key(
     user: Principal = Depends(current_user),
     svc: LlmCredentialsService | None = Depends(get_llm_credentials_service),
     audit: AuditLogService | None = Depends(get_audit_log_service),
+    team: TeamService | None = Depends(get_team_service),
 ) -> dict:
     if provider == "preferred":
         # Belt-and-suspenders: if anything ever bypasses the route order,
@@ -118,7 +141,7 @@ async def set_key(
             org_id=user.org_id,
             action="llm_key.set",
             resource_type="llm_provider",
-            actor_id=user.subject if _is_uuid(user.subject) else None,
+            actor_id=await _audit_actor_id(user, team),
             # Never log the secret — just a fingerprint of the new key.
             after={"provider": provider, "last_4": body.api_key[-4:]},
         )
@@ -131,6 +154,7 @@ async def delete_key(
     user: Principal = Depends(current_user),
     svc: LlmCredentialsService | None = Depends(get_llm_credentials_service),
     audit: AuditLogService | None = Depends(get_audit_log_service),
+    team: TeamService | None = Depends(get_team_service),
 ) -> None:
     if not user.role.can_edit():
         raise HTTPException(status_code=403, detail="Editor role required")
@@ -141,14 +165,6 @@ async def delete_key(
             org_id=user.org_id,
             action="llm_key.remove",
             resource_type="llm_provider",
-            actor_id=user.subject if _is_uuid(user.subject) else None,
+            actor_id=await _audit_actor_id(user, team),
             before={"provider": provider},
         )
-
-
-def _is_uuid(s: str) -> bool:
-    try:
-        UUID(str(s))
-        return True
-    except (ValueError, TypeError, AttributeError):
-        return False

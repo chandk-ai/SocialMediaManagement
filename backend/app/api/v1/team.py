@@ -89,7 +89,11 @@ async def update_member_role(
 ) -> dict:
     _require_admin(user)
     s = _require(svc)
-    if str(user_id) == user.subject and body.role is not Role.ADMIN:
+    # `Principal.subject` is the Supabase auth UID; the URL `user_id` is the
+    # local smms.users.id. Translate before comparing so the self-check
+    # actually fires.
+    me_local_id = await s.resolve_local_user_id(OrgId(UUID(user.org_id)), user.subject)
+    if me_local_id is not None and user_id == me_local_id and body.role is not Role.ADMIN:
         # Block self-demotion as a foot-gun guard. Admins can demote
         # themselves only via removing-and-recreating with a peer admin's
         # action, which is intentional friction.
@@ -127,7 +131,8 @@ async def remove_member(
 ) -> None:
     _require_admin(user)
     s = _require(svc)
-    if str(user_id) == user.subject:
+    me_local_id = await s.resolve_local_user_id(OrgId(UUID(user.org_id)), user.subject)
+    if me_local_id is not None and user_id == me_local_id:
         raise HTTPException(
             status_code=400,
             detail="You can't remove yourself. Have another admin do it.",

@@ -25,6 +25,12 @@ async def load_items(
             await adapter.connect()
             count = 0
             async for item in adapter.fetch(since=since):
+                # Annotate with the owning Source so the workflow service
+                # can later (a) detect CMS-mode items and (b) call back
+                # into the source plugin for status writeback.
+                # SourceItem is a frozen dataclass — mutate metadata in place.
+                item.metadata.setdefault("source_id", str(src.id))
+                item.metadata.setdefault("source_plugin", src.plugin_name)
                 out.append(item)
                 count += 1
                 if count >= limit_per_source:

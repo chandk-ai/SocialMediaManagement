@@ -195,6 +195,8 @@ def _post_to_domain(orm: PostORM) -> Post:
         scheduled_for=orm.scheduled_for, published_at=orm.published_at,
         external_post_id=orm.external_post_id, error=orm.error,
         created_at=orm.created_at,
+        source_id=SourceId(orm.source_id) if orm.source_id else None,
+        source_external_id=orm.source_external_id,
     )
 
 
@@ -208,6 +210,8 @@ def _post_to_orm(d: Post) -> PostORM:
         evaluation=_eval_to_dict(d.evaluation),
         scheduled_for=d.scheduled_for, published_at=d.published_at,
         external_post_id=d.external_post_id, error=d.error,
+        source_id=d.source_id,
+        source_external_id=d.source_external_id,
     )
 
 

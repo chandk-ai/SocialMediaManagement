@@ -22,7 +22,8 @@ from app.domain.entities.workflow_run import (
     WorkflowRun,
 )
 from app.domain.value_objects.content import DraftPost
-from app.domain.value_objects.ids import OrgId, ReviewId, RunId, TriggerId, WorkflowId
+from app.domain.value_objects.ids import OrgId, ReviewId, RunId, SourceId, TriggerId, WorkflowId
+from uuid import UUID
 from app.domain.value_objects.schedule import Schedule
 from app.domain.value_objects.targeting import TargetSelector
 from app.plugins.registry import PluginKind, PluginRegistry
@@ -288,6 +289,22 @@ class WorkflowService:
 
             run.transition(RunStatus.PLANNING)
             items = await load_items(sources, self.registry)
+
+            # ─── CMS path (Niche #3) ─────────────────────────────────
+            # If any source is in CMS mode, every item it yields is itself
+            # a publishable post — skip the agent loop entirely and turn
+            # rows into drafts directly. We still respect review channels
+            # and quorum gates downstream.
+            cms_items = [it for it in items if it.metadata.get("cms")]
+            if cms_items:
+                return await self._execute_cms(
+                    run=run, wf=wf, platforms=platforms,
+                    cms_items=cms_items,
+                    review_channel=review_channel,
+                    review_recipient=review_recipient,
+                    quorum_required=quorum_required,
+                )
+
             if directive:
                 run.append(AgentTraceEvent(agent="trigger", event="directive_received",
                                            payload={"directive": directive[:300],
@@ -391,6 +408,105 @@ class WorkflowService:
             run.transition(RunStatus.FAILED)
             await self.run_repo.update(run)
             raise
+
+    async def _execute_cms(
+        self,
+        *,
+        run: WorkflowRun,
+        wf: Workflow,
+        platforms: list,
+        cms_items,
+        review_channel: str | None,
+        review_recipient: str | None,
+        quorum_required: int,
+    ) -> WorkflowRun:
+        """Notion/Airtable-as-CMS path (Niche #3).
+
+        Each item is a row the user authored and marked Ready. We skip the
+        Planner/Evaluator/Critique loop because the user already planned
+        and evaluated themselves. The Executor's per-platform reformat is
+        also skipped — we trust the row's text verbatim. The review and
+        publish branches stay identical to the agent path so quorum,
+        scheduled-for, and rate-limit governors all keep working.
+        """
+        from app.domain.value_objects.content import DraftPost as _DraftPost
+        run.append(AgentTraceEvent(
+            agent="cms", event="loaded",
+            payload={"rows": len(cms_items)},
+        ))
+
+        # ── build drafts (one per row × platform) ────────────────────
+        drafts: list[_DraftPost] = []
+        link_by_draft: dict[int, tuple[str, str]] = {}     # id(draft) → (source_id, external_id)
+        for item in cms_items:
+            row_text = item.body or item.title
+            row_platforms = [
+                p.lower() for p in (item.metadata.get("platforms") or [])
+            ]
+            source_id = item.metadata.get("source_id")
+            for plat in platforms:
+                # If the row pinned specific platforms, skip ones that don't match.
+                if row_platforms and plat.plugin_name.lower() not in row_platforms:
+                    continue
+                draft = _DraftPost(
+                    platform_name=plat.plugin_name,
+                    text=row_text,
+                    hashtags=[],
+                    media=[],
+                )
+                drafts.append(draft)
+                link_by_draft[id(draft)] = (source_id or "", item.external_id)
+
+        if not drafts:
+            run.append(AgentTraceEvent(
+                agent="cms", event="no_matching_platforms",
+                payload={"rows": len(cms_items)},
+            ))
+            run.transition(RunStatus.SUCCEEDED)
+            await self.run_repo.update(run)
+            return run
+
+        # ── persist each draft as a Post, carrying the source link ───
+        posts: list[Post] = []
+        for draft in drafts:
+            sid_str, ext_id = link_by_draft.get(id(draft), ("", ""))
+            for target in [p for p in platforms if p.plugin_name == draft.platform_name]:
+                p = Post.from_draft(
+                    org_id=run.org_id, workflow_id=wf.id, run_id=run.id,
+                    platform_id=target.id, draft=draft,
+                    source_id=SourceId(UUID(sid_str)) if sid_str else None,
+                    source_external_id=ext_id or None,
+                )
+                p.status = PostStatus.REVIEW
+                posts.append(await self.post_repo.add(p))
+
+        # ── approval branching (same shape as the agent path) ───────
+        needs_human = wf.config.require_human_approval or bool(review_channel)
+        if not needs_human:
+            run.transition(RunStatus.PUBLISHING)
+            await self.run_repo.update(run)
+            draft_by_plugin = {d.platform_name: d for d in drafts}
+            for p in posts:
+                target = await self.platform_repo.get(run.org_id, p.platform_id)
+                if not target:
+                    continue
+                draft = draft_by_plugin.get(target.plugin_name)
+                if draft:
+                    await self._publish(p, draft, target)
+            run.transition(RunStatus.SUCCEEDED)
+        elif review_channel:
+            run.transition(RunStatus.AWAITING_REVIEW)
+            await self.run_repo.update(run)
+            await self._open_review_session(
+                run=run, posts=posts, drafts=drafts,
+                channel=review_channel,
+                recipient=review_recipient or "",
+                quorum_required=quorum_required,
+            )
+        else:
+            run.transition(RunStatus.NEEDS_REVIEW)
+        await self.run_repo.update(run)
+        return run
 
     async def _persist_drafts(
         self, run: WorkflowRun, wf: Workflow, platforms: list, final_state,
@@ -528,7 +644,66 @@ class WorkflowService:
             result = await adapter.publish(payload)
             post.mark_published(result.external_post_id)
             await self.post_repo.update(post)
+            # Niche #3 — when this Post originated from a CMS source row,
+            # call back so the source plugin can mark the row Published
+            # and write the live URL.
+            await self._cms_writeback_published(post, result_url=result.url)
         except Exception as exc:                            # noqa: BLE001
             post.mark_failed(str(exc))
             await self.post_repo.update(post)
+            await self._cms_writeback_failed(post, error=str(exc))
             raise   # let the worker retry-with-backoff handle it
+
+    async def _cms_writeback_published(
+        self, post: Post, *, result_url: str | None,
+    ) -> None:
+        if not post.source_id or not post.source_external_id:
+            return
+        await self._cms_writeback(
+            post,
+            success=True,
+            url=result_url,
+            error=None,
+        )
+
+    async def _cms_writeback_failed(
+        self, post: Post, *, error: str,
+    ) -> None:
+        if not post.source_id or not post.source_external_id:
+            return
+        await self._cms_writeback(
+            post, success=False, url=None, error=error,
+        )
+
+    async def _cms_writeback(
+        self, post: Post, *, success: bool, url: str | None, error: str | None,
+    ) -> None:
+        """Resolve the Source plugin and ask it to update the source row.
+        Errors are swallowed: a failed writeback should never undo a
+        successful publish (the post is already live)."""
+        try:
+            src = await self.source_repo.get(post.org_id, post.source_id)
+            if src is None:
+                return
+            entry = self.registry.get(PluginKind.SOURCE, src.plugin_name)
+            adapter = entry.cls(config=src.config)
+            if not getattr(adapter, "is_cms", False):
+                return
+            target_plugin = None
+            target = await self.platform_repo.get(post.org_id, post.platform_id)
+            if target is not None:
+                target_plugin = target.plugin_name
+            if success:
+                await adapter.mark_published(
+                    post.source_external_id,
+                    url=url, platform=target_plugin,
+                    published_at=post.published_at,
+                )
+            else:
+                await adapter.mark_failed(
+                    post.source_external_id,
+                    error=error or "publish failed",
+                    platform=target_plugin,
+                )
+        except Exception as exc:                            # noqa: BLE001
+            log.warning("cms_writeback_failed", post_id=str(post.id), error=str(exc))

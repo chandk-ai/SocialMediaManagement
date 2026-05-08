@@ -440,6 +440,27 @@ function AddingSources() {
         <li>Copy the database ID from the URL (32-char hex without dashes).</li>
         <li>In Sources, pick Notion → paste integration secret + database ID.</li>
       </Steps>
+      <P>
+        <strong>CMS mode (recommended for content teams):</strong> if you already
+        manage your content calendar in Notion, toggle "Treat each row as a
+        publishable post" on the Source. The system reads a <code>Status</code>{' '}
+        select field, only publishes rows you've marked <code>Ready</code>,
+        and writes back <code>Published</code> + the live URL when it's done.
+        Failures land back on the row as <code>Failed</code> with the error
+        text. No separate calendar to maintain.
+      </P>
+      <P>
+        Database fields the integration looks for (names configurable per Source):
+      </P>
+      <Bullets>
+        <li><strong>Name</strong> — title (built-in).</li>
+        <li><strong>Content</strong> — rich text — the actual post body.</li>
+        <li><strong>Status</strong> — select with values <code>Draft / Ready / Published / Failed</code>.</li>
+        <li><strong>Platforms</strong> — multi-select; values match plugin names (<code>linkedin</code>, <code>twitter</code>, ...). Empty = all the workflow's platforms.</li>
+        <li><strong>Scheduled at</strong> — date (optional, deferred-publish).</li>
+        <li><strong>Published URL</strong> — url, written by us after publish.</li>
+        <li><strong>Error</strong> — rich text, written on failure.</li>
+      </Bullets>
 
       <H2 id="source-drive">Google Drive</H2>
       <Steps>
