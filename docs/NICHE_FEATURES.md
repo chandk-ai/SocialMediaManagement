@@ -182,6 +182,34 @@ sign off, but you don't want to wait for everyone.
 
 ---
 
+## Production smoke test
+
+`scripts/smoke_test.py` — Python stdlib only, drives the deployed system
+through the read-only invariants (and an optional create-cleanup round
+trip via `--write`). Use after every production deploy.
+
+```bash
+# Read-only against your prod URL:
+BASE_URL=https://api.example.com \
+SUPABASE_URL=https://xxx.supabase.co \
+SUPABASE_ANON_KEY=ey... \
+SMMS_EMAIL=admin@acme.com \
+SMMS_PASSWORD=... \
+python scripts/smoke_test.py
+
+# Read + create-and-cleanup:
+python scripts/smoke_test.py --write
+
+# Or skip Supabase sign-in by passing a bearer token directly:
+SMMS_BEARER=ey... BASE_URL=https://api.example.com python scripts/smoke_test.py
+```
+
+What it checks: liveness, readiness (Postgres + Redis pings), `/auth/me`
+(verifies you're not in the placeholder org), audit hash-chain integrity,
+LLM budget shape, compliance profile registry, plugin counts per kind,
+team members. With `--write`: creates a Source / Platform / Workflow,
+verifies they're listed, and deletes them in a `finally` block.
+
 ## Niches still pending (held)
 
 - **#2 Voice-clone brand fingerprint** — scoped to your *connected*
