@@ -1,2 +1,7 @@
 .vercel
 .env*.local
+
+# Playwright artifacts — never commit traces / videos / screenshots.
+/test-results/
+/playwright-report/
+/playwright/.cache/

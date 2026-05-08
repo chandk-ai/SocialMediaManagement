@@ -4,7 +4,7 @@ import { usePathname } from 'next/navigation';
 import {
   LayoutDashboard, Workflow, Plug, Database, FileText, Settings,
   Zap, MessageSquare, BarChart3, Calendar, ScrollText, X, Sparkles,
-  BookOpen,
+  BookOpen, Users,
   type LucideIcon,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -28,9 +28,10 @@ const items: NavItem[] = [
   { href: '/analytics',  label: 'Analytics',  icon: BarChart3,       group: 'main' },
   { href: '/audit',      label: 'Audit log',  icon: ScrollText,      group: 'main' },
   // Help section — pinned to the bottom of the nav
-  { href: '/onboarding', label: 'Get started', icon: Sparkles,       group: 'help' },
-  { href: '/help',       label: 'Help & docs', icon: BookOpen,       group: 'help' },
-  { href: '/settings',   label: 'Settings',    icon: Settings,       group: 'help' },
+  { href: '/onboarding',     label: 'Get started', icon: Sparkles,    group: 'help' },
+  { href: '/help',           label: 'Help & docs', icon: BookOpen,    group: 'help' },
+  { href: '/settings/team',  label: 'Team',        icon: Users,       group: 'help' },
+  { href: '/settings',       label: 'Settings',    icon: Settings,    group: 'help' },
 ];
 
 export function Sidebar({ mobileOpen = false, onMobileClose }: {
@@ -38,6 +39,10 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: {
   onMobileClose?: () => void;
 }) {
   const pathname = usePathname();
+  // Match exact path or proper sub-path (with segment boundary). Plain
+  // startsWith would mark `/settings` active when we're on `/settings/team`.
+  const isActive = (href: string) =>
+    !!pathname && (pathname === href || pathname.startsWith(href + '/'));
   return (
     <>
       {/* mobile backdrop */}
@@ -67,7 +72,7 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: {
         </div>
         <nav className="flex flex-col gap-0.5 flex-1">
           {items.filter(i => i.group !== 'help').map(({ href, label, icon: Icon }) => {
-            const active = pathname?.startsWith(href);
+            const active = isActive(href);
             return (
               <Link
                 key={href} href={href}
@@ -89,7 +94,7 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: {
             Help
           </div>
           {items.filter(i => i.group === 'help').map(({ href, label, icon: Icon }) => {
-            const active = pathname?.startsWith(href);
+            const active = isActive(href);
             return (
               <Link
                 key={href} href={href}

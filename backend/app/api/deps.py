@@ -201,6 +201,31 @@ def get_llm_usage_service():
 
 
 @lru_cache
+def _get_team_service():
+    """Team / invitation service. None on memory backend (the auto-claim
+    flow + member management are Postgres-only)."""
+    settings = get_settings()
+    if settings.resolved_persistence_backend() != "supabase":
+        return None
+    try:
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from app.services.team import TeamService
+        engine = create_async_engine(
+            settings.db_url(),
+            pool_pre_ping=True,
+            connect_args=settings.db_connect_args(),
+        )
+        sm = async_sessionmaker(engine, expire_on_commit=False)
+        return TeamService(sm)
+    except Exception:                                            # noqa: BLE001
+        return None
+
+
+def get_team_service():
+    return _get_team_service()
+
+
+@lru_cache
 def _get_audit_log_service():
     """Append-only audit log writer. None on memory backend (audit_log table
     is Postgres-only); callers should null-guard."""

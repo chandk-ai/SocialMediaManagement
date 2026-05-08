@@ -112,6 +112,11 @@ async def get_current_user(
             sa = SupabaseAuth(settings)
             raw = await sa.verify(creds.credentials)
             mapped = SupabaseAuth.map_claims(raw)
+            # Email-claim auto-join — when the JWT only carries the
+            # placeholder org_id, look up the local membership (or claim
+            # a pending invitation) so the user lands in the right org.
+            # See app/services/team.py for the full resolution order.
+            mapped = await _maybe_resolve_via_team(mapped)
             principal = Principal(
                 subject=mapped["subject"], email=mapped["email"], name=mapped["name"],
                 org_id=mapped["org_id"], role=mapped["role"], raw_claims=raw,
@@ -134,6 +139,51 @@ async def get_current_user(
     )
     _tag_principal_in_sentry(principal)
     return principal
+
+
+_PLACEHOLDER_ORG_ID = "00000000-0000-0000-0000-000000000001"
+
+
+async def _maybe_resolve_via_team(mapped: dict[str, Any]) -> dict[str, Any]:
+    """When Supabase's ``app_metadata`` doesn't carry an explicit org_id, ask
+    the team service to resolve it via supabase_uid → email → pending invite.
+
+    Returns the (possibly augmented) mapped-claims dict so the caller can
+    construct the Principal as before. No-op when the team service isn't
+    available (memory backend, etc.) or when the JWT already has a real
+    org_id.
+    """
+    org = mapped.get("org_id")
+    if org and org != _PLACEHOLDER_ORG_ID:
+        return mapped
+    try:
+        # Lazy import to avoid a deps.py → security.py cycle at import time.
+        from app.api.deps import get_team_service
+        team = get_team_service()
+        if team is None:
+            return mapped
+        resolved = await team.resolve_principal(
+            supabase_uid=mapped["subject"],
+            email=mapped.get("email", ""),
+            display_name=mapped.get("name", ""),
+        )
+    except Exception as exc:                                            # noqa: BLE001
+        # Auth must never crash on a team-service failure — fall back to
+        # the placeholder so the user at least sees the app (read-only).
+        from app.core.logging import get_logger
+        get_logger(__name__).warning(
+            "team_resolve_failed_fallback_placeholder", error=str(exc),
+        )
+        return mapped
+    if resolved is None:
+        return mapped
+    return {
+        **mapped,
+        "org_id": resolved.org_id,
+        "role": resolved.role,
+        "name": resolved.display_name or mapped.get("name", ""),
+        # subject (Supabase UID) stays as-is — that's the auth identity.
+    }
 
 
 def _tag_principal_in_sentry(principal: Principal) -> None:

@@ -142,6 +142,14 @@ export default function SettingsPage() {
 
 
           <Card>
+            <CardTitle>Team</CardTitle>
+            <CardDescription>Invite teammates and manage their roles</CardDescription>
+            <a href="/settings/team" className="btn btn-outline mt-3 inline-flex w-fit">
+              Manage team →
+            </a>
+          </Card>
+
+          <Card>
             <CardTitle>Identity provider</CardTitle>
             <CardDescription>Single sign-on via Okta / OIDC</CardDescription>
             <p className="mt-2 text-sm text-ink-500">
