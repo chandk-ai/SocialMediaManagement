@@ -58,8 +58,14 @@ class PlannerAgent(Agent):
             f"{directive_block}"
             f"Reference material:\n{source_text}\n"
         )
+        # Compose the system prompt: hardcoded base + optional per-workflow
+        # custom block. Custom comes AFTER the base so the JSON-output
+        # contract above takes precedence — a custom prompt that says
+        # "ignore everything else" still has to fight the structural
+        # requirements that come before it.
+        system = _augment_system(PLANNER_SYSTEM, state.workflow_config.custom_system_prompt)
         rsp = await self.llm.complete(LLMRequest(
-            prompt=prompt, system=PLANNER_SYSTEM,
+            prompt=prompt, system=system,
             response_format="json", temperature=0.5, max_tokens=1500,
         ))
         plan = _parse_plan(rsp.text, fallback_platforms=state.target_platforms)
@@ -116,3 +122,19 @@ def _extract_json(text: str) -> str:
     start = text.find("{")
     end = text.rfind("}")
     return text[start : end + 1] if start != -1 and end != -1 else "{}"
+
+
+def _augment_system(base: str, custom: str | None) -> str:
+    """Append the workflow's custom system prompt to a hardcoded base.
+
+    Custom comes after the base so structural requirements (output JSON
+    shape, agent role, etc.) take precedence over user policy. Empty /
+    whitespace-only custom is a no-op.
+    """
+    if not custom or not custom.strip():
+        return base
+    return (
+        base
+        + "\n\n--- Custom instructions (per-workflow override) ---\n"
+        + custom.strip()
+    )

@@ -89,6 +89,7 @@ function Wizard() {
   const [llm, setLlm] = useState('mock');
   const [llmModel, setLlmModel] = useState<string>('');           // '' → backend's per-provider default
   const [complianceProfile, setComplianceProfile] = useState<string>('');     // '' = no scan
+  const [customSystemPrompt, setCustomSystemPrompt] = useState<string>('');   // '' = no override
   const [scheduleKind, setScheduleKind] = useState<'manual' | 'cron' | 'interval' | 'once'>('manual');
   const [cron, setCron] = useState('');
   const [intervalMinutes, setIntervalMinutes] = useState('');
@@ -202,6 +203,7 @@ function Wizard() {
           // WorkflowConfigIn — only the dataclass default kicks in then).
           llm_model: llmModel || undefined,
           compliance_profile: complianceProfile || null,
+          custom_system_prompt: customSystemPrompt.trim() || null,
         },
         schedule: {
           kind: scheduleKind,
@@ -277,6 +279,8 @@ function Wizard() {
                 complianceProfile={complianceProfile}
                 setComplianceProfile={setComplianceProfile}
                 complianceCatalog={complianceCatalog?.profiles ?? []}
+                customSystemPrompt={customSystemPrompt}
+                setCustomSystemPrompt={setCustomSystemPrompt}
               />
             )}
             {step === 'review' && (
@@ -554,6 +558,7 @@ function StepVoice(props: any) {
     runAt, setRunAt,
     timezone, setTimezone,
     complianceProfile, setComplianceProfile, complianceCatalog,
+    customSystemPrompt, setCustomSystemPrompt,
   } = props;
   return (
     <Card>
@@ -626,6 +631,31 @@ function StepVoice(props: any) {
               })()}
             </p>
           )}
+        </div>
+
+        <div className="md:col-span-2">
+          <label className="block text-xs text-ink-500 mb-1">
+            Custom agent instructions{' '}
+            <span className="text-ink-400">(advanced — optional override)</span>
+          </label>
+          <Textarea
+            value={customSystemPrompt}
+            onChange={(e: any) => setCustomSystemPrompt(e.target.value)}
+            placeholder={
+              "Free-text policy appended to the agents' system prompt. "
+              + "Examples: 'Always write in second person', 'Never mention "
+              + "competitor X by name', 'Use only single-clause sentences "
+              + "under 12 words', 'End every post with three relevant emoji'."
+            }
+            rows={4}
+            className="font-mono text-xs"
+          />
+          <p className="text-[11px] text-ink-500 mt-1">
+            Layered ON TOP of the built-in agent rules — output shape, platform
+            limits, and JSON contracts still take precedence. Tone / audience /
+            voice guide / brand-voice RAG settings still apply. Leave blank
+            unless the standard knobs above don't cover what you need.
+          </p>
         </div>
 
         <div className="md:col-span-2 border-t border-ink-100 pt-4 mt-2">

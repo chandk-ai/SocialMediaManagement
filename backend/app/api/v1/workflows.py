@@ -44,6 +44,7 @@ def _to_config(c: WorkflowConfigIn) -> WorkflowConfig:
             c.compliance_profile if (c.compliance_profile or "").lower() not in ("", "none")
             else None
         ),
+        custom_system_prompt=(c.custom_system_prompt or "").strip() or None,
         extra=c.extra,
     )
 

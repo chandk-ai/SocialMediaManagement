@@ -23,6 +23,9 @@ class WorkflowConfigIn(APIModel):
     # Niche #4 — compliance profile name (finra / hipaa / fda / crypto / gdpr).
     # None or "none" disables the scan.
     compliance_profile: str | None = None
+    # Power-user override: appended to the Planner + Executor system
+    # prompts. None / empty = no override.
+    custom_system_prompt: str | None = None
     extra: dict = Field(default_factory=dict)
 
 

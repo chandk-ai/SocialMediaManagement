@@ -37,6 +37,15 @@ class WorkflowConfig:
     # EvaluationReport `flags`, which the Critique agent already treats as
     # an automatic escalate-to-human. ``None`` = no compliance scan.
     compliance_profile: str | None = None
+    # Free-text instructions appended to the Planner + Executor system
+    # prompts. Lets power users add policy beyond what tone / audience /
+    # voice_guide cover (e.g. "always write in second person", "never
+    # mention competitor X by name", "use only single-clause sentences
+    # under 12 words"). Composed AFTER the hardcoded system block so the
+    # JSON-output requirements + agent-role instructions still take
+    # precedence — this can't accidentally turn the planner into a
+    # different agent.
+    custom_system_prompt: str | None = None
     extra: dict = field(default_factory=dict)
 
 

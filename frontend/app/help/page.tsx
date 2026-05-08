@@ -541,6 +541,42 @@ function BuildingWorkflows() {
         schedule, or voice. Click <strong>Details</strong> to see the agent trace per run +
         post history.
       </P>
+
+      <H2 id="wf-context">Where the agent's behaviour comes from</H2>
+      <P>
+        Each draft is built from <strong>six</strong> stacked layers of context.
+        From most-stable to most-runtime:
+      </P>
+      <Bullets>
+        <li><strong>Hardcoded system prompts</strong> — Planner / Executor / Evaluator each have a baseline prompt in code that defines their role and the JSON output contract. These are NOT user-editable and they ALWAYS take precedence.</li>
+        <li><strong>WorkflowConfig knobs</strong> — tone, audience, voice guide, LLM provider/model, quality thresholds, max revisions, compliance profile, brand-voice toggle. These slot into the prompt automatically.</li>
+        <li><strong>Source items</strong> — title + body of whatever the planner pulled from your configured sources. In Notion CMS-mode, the row's body becomes the post text directly (Planner is bypassed).</li>
+        <li><strong>Directive</strong> — free-text per-run instruction from a chat trigger ("Post about Q4 launch on every IG account"). Lets a single workflow handle many distinct posts.</li>
+        <li><strong>Brand-voice block</strong> — when <code>use_brand_voice</code> is on, top-K past high-engagement posts are spliced into the Executor's system prompt as "here's how this org's voice sounds."</li>
+        <li><strong>Critique notes</strong> — on revision rounds, the Critique agent's notes get prepended as "Prior critique to address:" so the next round actually improves on the last.</li>
+      </Bullets>
+
+      <H2 id="wf-custom-prompt">Custom agent instructions (advanced)</H2>
+      <P>
+        The Voice & schedule step has a <strong>Custom agent instructions</strong>{' '}
+        textarea for power users. Whatever you type lands in both the Planner
+        and Executor system prompts under a "Custom instructions (per-workflow
+        override)" header — APPENDED after the hardcoded base, so the JSON
+        output contract and platform rules still take precedence.
+      </P>
+      <P>Useful when the standard knobs above don't quite cover what you need:</P>
+      <Bullets>
+        <li><em>"Always write in second person ('you' not 'we' or 'they')."</em></li>
+        <li><em>"Never mention competitor X by name."</em></li>
+        <li><em>"Use only single-clause sentences under 12 words."</em></li>
+        <li><em>"End every post with three relevant emoji."</em></li>
+        <li><em>"For LinkedIn, always include a one-line takeaway in bold; for Twitter, never include hashtags."</em></li>
+      </Bullets>
+      <P>
+        Leave it blank unless you've got a specific style rule that{' '}
+        <code>tone</code>, <code>audience</code>, and <code>voice_guide</code>{' '}
+        can't express. Most workflows do fine without it.
+      </P>
     </>
   );
 }

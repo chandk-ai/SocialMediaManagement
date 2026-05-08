@@ -57,8 +57,15 @@ class ExecutorAgent(Agent):
                 f"Hashtags: {[h.value for h in bp.hashtags]}\n"
                 f"{critique_block}"
             )
+            # System prompt = hardcoded base + voice RAG (if any) + per-workflow
+            # custom block (if any). The custom block lands LAST so the agent's
+            # core rules (platform limits, hashtag placement, etc.) still
+            # take precedence — see comment in app/agents/planner.py.
+            system = EXECUTOR_SYSTEM + voice_block + _custom_block(
+                state.workflow_config.custom_system_prompt,
+            )
             rsp = await self.llm.complete(LLMRequest(
-                prompt=prompt, system=EXECUTOR_SYSTEM + voice_block,
+                prompt=prompt, system=system,
                 temperature=0.7, max_tokens=600,
             ))
             text = rsp.text.strip()
@@ -74,6 +81,18 @@ class ExecutorAgent(Agent):
         drafts = await asyncio.gather(*(_make_one(b) for b in state.plan.blueprints))
         state.log(self.name, "drafts_generated", count=len(drafts), revision=state.revision_count)
         return state.merge(drafts=list(drafts))
+
+
+def _custom_block(custom: str | None) -> str:
+    """Wrap the workflow's optional custom system-prompt with a header so
+    the LLM treats it as supplementary policy, not a replacement of the
+    main agent contract. Empty / whitespace-only is a no-op."""
+    if not custom or not custom.strip():
+        return ""
+    return (
+        "\n\n--- Custom instructions (per-workflow override) ---\n"
+        + custom.strip()
+    )
 
 
 # ── media generation helper ───────────────────────────────────────────────
