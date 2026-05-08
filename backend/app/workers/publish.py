@@ -101,7 +101,7 @@ async def _publish(org_id: str, post_id: str) -> str:
 
 
 async def _terminal_failure(org_id: str, post_id: str, reason: str) -> None:
-    from app.api.deps import _build_repos
+    from app.api.deps import _build_repos, get_audit_log_service
     from app.domain.entities.post import PostStatus
     from app.domain.value_objects.ids import OrgId, PostId
     repos = _build_repos()
@@ -112,3 +112,18 @@ async def _terminal_failure(org_id: str, post_id: str, reason: str) -> None:
     post.status = PostStatus.FAILED
     post.error = f"DLQ: {reason}"[:1000]
     await repos["post"].update(post)
+    # Make the DLQ visible in the org's audit log — operators looking at
+    # /audit see *every* terminal failure, not just user-initiated ones.
+    audit = get_audit_log_service()
+    if audit is not None:
+        await audit.record(
+            org_id=org_id,
+            actor_type="system",
+            action="post.publish.dlq",
+            resource_type="post",
+            resource_id=post_id,
+            after={
+                "platform_id": str(post.platform_id),
+                "reason": reason[:500],
+            },
+        )

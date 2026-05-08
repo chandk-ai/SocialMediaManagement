@@ -55,38 +55,46 @@ def tick_scheduler() -> int:
 
 
 async def _tick_async() -> int:
+    """Pull every ACTIVE workflow across all orgs (single SQL query on
+    Supabase; one in-memory scan in dev) and enqueue the ones that are due.
+
+    Why a single cross-tenant scan rather than per-org iteration:
+      * Beat runs once a minute on a single dyno, so RLS isn't useful here
+        (no user context).
+      * Filtering ``WHERE status='active'`` at the DB level keeps the worker
+        from materialising paused workflows that we'd just discard anyway.
+      * This was previously broken: the old version probed
+        ``workflow_repo._s``, which only exists on the in-memory repo.
+        Supabase deployments silently returned 0, so cron / interval
+        schedules never fired in production.
+    """
     from app.api.deps import _build_repos, get_registry
-    repos = _build_repos()
-    registry = get_registry()                            # noqa: F841 — warm cache
-    now = datetime.now(timezone.utc)
-    enqueued = 0
-
-    # Iterate every org's active workflows. For Supabase backend you'd query
-    # a single `WHERE status='active'`; the in-memory backend is per-org so
-    # we'd need an outer scan. The `WorkflowRepository.list_due()` extension
-    # is the production move; here we keep it simple.
-    workflow_repo = repos["workflow"]
-    if not hasattr(workflow_repo, "list_active_due"):
-        # A smart workflow_repo can short-circuit; otherwise the worker pulls
-        # all and filters. The bound is N(active workflows), not N(orgs).
-        log.debug("scheduler_using_in_memory_scan")
-
-    # Lazy import — ListAvailableOrgs / GetActive happens at the repo level
-    # in production; for now we delegate to the run service to enqueue per id.
     from app.workers.workflow_runner import run_workflow as run_task
 
-    # Iterate via the global repo pool — a cheap protocol check
-    orgs_seen = getattr(workflow_repo, "_s", {})         # in-memory tail
-    if isinstance(orgs_seen, dict):
-        for org_id, by_id in orgs_seen.items():
-            for wf in by_id.values():
-                if _is_due(wf, now):
-                    run_task.delay(str(org_id), str(wf.id))
-                    log.info("scheduler_enqueued",
-                             workflow_id=str(wf.id),
-                             org_id=str(org_id),
-                             kind=wf.schedule.kind.value)
-                    enqueued += 1
+    repos = _build_repos()
+    get_registry()                                       # warm the cache
+    workflow_repo = repos["workflow"]
+
+    # Every implementation registered in repositories/ports.py now defines
+    # list_active_all_orgs(). Older repos still get a graceful no-op.
+    list_active = getattr(workflow_repo, "list_active_all_orgs", None)
+    if list_active is None:
+        log.warning("scheduler_repo_missing_list_active_all_orgs")
+        return 0
+
+    now = datetime.now(timezone.utc)
+    enqueued = 0
+    pairs = await list_active()
+    for org_id, wf in pairs:
+        if _is_due(wf, now):
+            run_task.delay(str(org_id), str(wf.id))
+            log.info("scheduler_enqueued",
+                     workflow_id=str(wf.id),
+                     org_id=str(org_id),
+                     kind=wf.schedule.kind.value)
+            enqueued += 1
+    log.info("scheduler_tick_done",
+             active_workflows=len(pairs), enqueued=enqueued)
     return enqueued
 
 

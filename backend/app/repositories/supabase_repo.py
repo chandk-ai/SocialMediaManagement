@@ -360,6 +360,22 @@ class SupabaseWorkflowRepository(_Base):
             )
             await s.commit()
 
+    async def list_active_all_orgs(self) -> list[tuple[OrgId, Workflow]]:
+        """Cross-tenant scan used by Celery Beat. Filters at the database
+        level so we don't pull paused/archived rows over the wire — this
+        stays cheap as the workflow count grows.
+
+        Note: bypasses RLS by relying on the service-role connection the
+        worker uses; that's fine here because the scheduler runs in the
+        platform's privileged process, not on behalf of a user."""
+        async with self._sm() as s:
+            rows = (await s.execute(
+                select(WorkflowORM)
+                .where(WorkflowORM.status == "active")
+                .order_by(WorkflowORM.org_id, WorkflowORM.id),
+            )).scalars().all()
+            return [(OrgId(r.org_id), _workflow_to_domain(r)) for r in rows]
+
 
 class SupabaseWorkflowRunRepository(_Base):
     async def add(self, r: WorkflowRun) -> WorkflowRun:

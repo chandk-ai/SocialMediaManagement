@@ -97,6 +97,17 @@ class InMemoryWorkflowRepository:
     async def delete(self, org_id: OrgId, wid: WorkflowId) -> None:
         self._s.for_org(org_id).pop(wid, None)
 
+    async def list_active_all_orgs(self) -> list[tuple[OrgId, Workflow]]:
+        """Cross-tenant scan used by the Celery Beat scheduler."""
+        from app.domain.entities.workflow import WorkflowStatus
+        out: list[tuple[OrgId, Workflow]] = []
+        for org_id, by_id in self._s.items():
+            for wf in by_id.values():
+                if wf.status is WorkflowStatus.ACTIVE:
+                    out.append((org_id, wf))
+        out.sort(key=lambda pair: str(pair[0]))
+        return out
+
 
 class InMemoryWorkflowRunRepository:
     def __init__(self) -> None:
