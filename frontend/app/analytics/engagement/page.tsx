@@ -19,8 +19,8 @@
  * spot-checking whether the fetcher is keeping up.
  */
 import { useEffect, useMemo, useState } from 'react';
-import { fetchJSON } from '@/lib/api';
-import { showToast } from '@/components/Toast';
+import { api } from '@/lib/api/client';
+import { toast } from '@/components/ui/Toast';
 import { Activity, BarChart3, RefreshCw, TrendingUp } from 'lucide-react';
 
 type Result = {
@@ -48,10 +48,10 @@ export default function EngagementAnalyticsPage() {
   async function load() {
     setLoading(true);
     try {
-      const data = await fetchJSON(`/api/v1/engagement/learnings/${dim}?limit=30`);
+      const data = await api.get<{ results: Result[] }>(`/engagement/learnings/${dim}?limit=30`);
       setResults((data.results || []) as Result[]);
     } catch (e: any) {
-      showToast({ title: 'Failed to load learnings', body: e?.message || 'unknown', tone: 'error' });
+      toast.error(`Failed to load learnings: ${e?.message || 'unknown'}`);
     } finally {
       setLoading(false);
     }
@@ -59,21 +59,21 @@ export default function EngagementAnalyticsPage() {
 
   async function loadRecent() {
     try {
-      const data = await fetchJSON('/api/v1/engagement/recent?limit=50');
+      const data = await api.get<{ snapshots: any[] }>('/engagement/recent?limit=50');
       setSnapshots(data.snapshots || []);
     } catch (e: any) {
-      showToast({ title: 'Failed to load snapshots', body: e?.message || 'unknown', tone: 'error' });
+      toast.error(`Failed to load snapshots: ${e?.message || 'unknown'}`);
     }
   }
 
   async function recompute() {
     setAggregating(true);
     try {
-      const data = await fetchJSON('/api/v1/engagement/aggregate', { method: 'POST' });
-      showToast({ title: 'Rollup recomputed', body: `${data.rollup_rows} rows`, tone: 'success' });
+      const data = await api.post<{ rollup_rows: number }>('/engagement/aggregate');
+      toast.success(`Rollup recomputed: ${data.rollup_rows} rows`);
       load();
     } catch (e: any) {
-      showToast({ title: 'Recompute failed', body: e?.message || 'unknown', tone: 'error' });
+      toast.error(`Recompute failed: ${e?.message || 'unknown'}`);
     } finally {
       setAggregating(false);
     }

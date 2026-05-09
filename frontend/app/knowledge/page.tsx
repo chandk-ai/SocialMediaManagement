@@ -13,8 +13,8 @@
  * read at generation time.
  */
 import { useEffect, useMemo, useState } from 'react';
-import { fetchJSON } from '@/lib/api';
-import { showToast } from '@/components/Toast';
+import { api } from '@/lib/api/client';
+import { toast } from '@/components/ui/Toast';
 import { BookOpen, Plus, Trash2, Search, Sparkles } from 'lucide-react';
 
 type Doc = {
@@ -58,10 +58,10 @@ export default function KnowledgePage() {
   async function load() {
     setLoading(true);
     try {
-      const data = await fetchJSON('/api/v1/knowledge/documents?limit=500');
+      const data = await api.get<{ documents: Doc[] }>('/knowledge/documents?limit=500');
       setDocs(data.documents || []);
     } catch (e: any) {
-      showToast({ title: 'Failed to load KB', body: e?.message || 'unknown', tone: 'error' });
+      toast.error(`Failed to load KB: ${e?.message || 'unknown'}`);
     } finally {
       setLoading(false);
     }
@@ -72,15 +72,12 @@ export default function KnowledgePage() {
     if (!title.trim() || !content.trim()) return;
     setSaving(true);
     try {
-      await fetchJSON('/api/v1/knowledge/documents', {
-        method: 'POST',
-        body: JSON.stringify({ title, content, source_kind: kind }),
-      });
-      showToast({ title: 'Added to KB', body: title, tone: 'success' });
+      await api.post('/knowledge/documents', { title, content, source_kind: kind });
+      toast.success(`Added to KB: ${title}`);
       setTitle(''); setContent(''); setShowAdd(false);
       load();
     } catch (e: any) {
-      showToast({ title: 'Add failed', body: e?.message || 'unknown', tone: 'error' });
+      toast.error(`Add failed: ${e?.message || 'unknown'}`);
     } finally {
       setSaving(false);
     }
@@ -89,11 +86,11 @@ export default function KnowledgePage() {
   async function delDoc(id: string) {
     if (!confirm('Delete this document and all its chunks?')) return;
     try {
-      await fetchJSON(`/api/v1/knowledge/documents/${id}`, { method: 'DELETE' });
-      showToast({ title: 'Deleted', tone: 'success' });
+      await api.del(`/knowledge/documents/${id}`);
+      toast.success('Deleted');
       load();
     } catch (e: any) {
-      showToast({ title: 'Delete failed', body: e?.message || 'unknown', tone: 'error' });
+      toast.error(`Delete failed: ${e?.message || 'unknown'}`);
     }
   }
 
@@ -101,13 +98,10 @@ export default function KnowledgePage() {
     if (!searchQ.trim()) { setHits(null); return; }
     setSearching(true);
     try {
-      const data = await fetchJSON('/api/v1/knowledge/search', {
-        method: 'POST',
-        body: JSON.stringify({ query: searchQ, top_k: 8 }),
-      });
+      const data = await api.post<{ hits: Hit[] }>('/knowledge/search', { query: searchQ, top_k: 8 });
       setHits(data.hits || []);
     } catch (e: any) {
-      showToast({ title: 'Search failed', body: e?.message || 'unknown', tone: 'error' });
+      toast.error(`Search failed: ${e?.message || 'unknown'}`);
     } finally {
       setSearching(false);
     }

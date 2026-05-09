@@ -13,8 +13,8 @@
  * can audit what's installed and what config each plugin expects.
  */
 import { useEffect, useMemo, useState } from 'react';
-import { fetchJSON } from '@/lib/api';
-import { showToast } from '@/components/Toast';
+import { api } from '@/lib/api/client';
+import { toast } from '@/components/ui/Toast';
 import { Package, Sparkles, Shield, AlertTriangle, ChevronRight } from 'lucide-react';
 
 type Plugin = {
@@ -43,10 +43,10 @@ export default function MarketplacePage() {
 
   async function load() {
     try {
-      const data = await fetchJSON('/api/v1/marketplace');
+      const data = await api.get<{ kinds: Record<string, Plugin[]> }>('/marketplace');
       setCatalog(data.kinds || {});
     } catch (e: any) {
-      showToast({ title: 'Failed to load catalog', body: e?.message || 'unknown', tone: 'error' });
+      toast.error(`Failed to load catalog: ${e?.message || 'unknown'}`);
     } finally {
       setLoading(false);
     }
@@ -124,14 +124,14 @@ function PluginDetail({ plugin: p }: { plugin: Plugin }) {
   async function validate() {
     setValidating(true);
     try {
-      const data = await fetchJSON('/api/v1/marketplace/validate', {
-        method: 'POST',
-        body: JSON.stringify({ kind: p.kind, name: p.name, config }),
-      });
+      const data = await api.post<{ ok: boolean; errors: { path: string; msg: string }[] }>(
+        '/marketplace/validate',
+        { kind: p.kind, name: p.name, config },
+      );
       setErrors(data.errors || []);
-      if (data.ok) showToast({ title: 'Config is valid', tone: 'success' });
+      if (data.ok) toast.success('Config is valid');
     } catch (e: any) {
-      showToast({ title: 'Validation failed', body: e?.message || 'unknown', tone: 'error' });
+      toast.error(`Validation failed: ${e?.message || 'unknown'}`);
     } finally {
       setValidating(false);
     }

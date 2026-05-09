@@ -12,8 +12,8 @@
  * run_id when present) for the full trace.
  */
 import { useEffect, useMemo, useState } from 'react';
-import { fetchJSON } from '@/lib/api';
-import { showToast } from '@/components/Toast';
+import { api } from '@/lib/api/client';
+import { toast } from '@/components/ui/Toast';
 import { RefreshCw, XCircle, RotateCcw, AlertTriangle, Clock, CheckCircle2, Activity } from 'lucide-react';
 
 type Job = {
@@ -51,11 +51,11 @@ export default function AdminJobsPage() {
       const params = new URLSearchParams({ limit: '300' });
       if (filter !== 'all') params.set('status', filter);
       if (kindFilter !== 'all') params.set('kind', kindFilter);
-      const data = await fetchJSON(`/api/v1/jobs?${params.toString()}`);
+      const data = await api.get<{ jobs: Job[]; counts: Record<string, number> }>(`/jobs?${params.toString()}`);
       setJobs(data.jobs || []);
       setCounts(data.counts || {});
     } catch (e: any) {
-      showToast({ title: 'Failed to load jobs', body: e?.message || 'unknown', tone: 'error' });
+      toast.error(`Failed to load jobs: ${e?.message || 'unknown'}`);
     } finally {
       setLoading(false);
     }
@@ -75,31 +75,31 @@ export default function AdminJobsPage() {
   async function cancel(id: string) {
     if (!confirm('Cancel this job?')) return;
     try {
-      await fetchJSON(`/api/v1/jobs/${id}/cancel`, { method: 'POST', body: JSON.stringify({ reason: 'admin cancel' }) });
-      showToast({ title: 'Cancelled', body: id.slice(0, 8), tone: 'success' });
+      await api.post(`/jobs/${id}/cancel`, { reason: 'admin cancel' });
+      toast.success(`Cancelled ${id.slice(0, 8)}`);
       refresh();
     } catch (e: any) {
-      showToast({ title: 'Cancel failed', body: e?.message || 'unknown', tone: 'error' });
+      toast.error(`Cancel failed: ${e?.message || 'unknown'}`);
     }
   }
 
   async function retry(id: string) {
     try {
-      await fetchJSON(`/api/v1/jobs/${id}/retry`, { method: 'POST' });
-      showToast({ title: 'Re-queued', body: id.slice(0, 8), tone: 'success' });
+      await api.post(`/jobs/${id}/retry`);
+      toast.success(`Re-queued ${id.slice(0, 8)}`);
       refresh();
     } catch (e: any) {
-      showToast({ title: 'Retry failed', body: e?.message || 'unknown', tone: 'error' });
+      toast.error(`Retry failed: ${e?.message || 'unknown'}`);
     }
   }
 
   async function sweep() {
     try {
-      const data = await fetchJSON('/api/v1/jobs/sweep', { method: 'POST' });
-      showToast({ title: 'Recovery sweep complete', body: `Recovered ${data.recovered}`, tone: 'success' });
+      const data = await api.post<{ recovered: number }>('/jobs/sweep');
+      toast.success(`Recovery sweep: recovered ${data.recovered}`);
       refresh();
     } catch (e: any) {
-      showToast({ title: 'Sweep failed', body: e?.message || 'unknown', tone: 'error' });
+      toast.error(`Sweep failed: ${e?.message || 'unknown'}`);
     }
   }
 
