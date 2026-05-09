@@ -28,6 +28,17 @@ async def health() -> dict:
     return {"status": "ok"}
 
 
+@router.get("/metrics", summary="Prometheus metrics", include_in_schema=False)
+async def metrics() -> Response:
+    """Pillar 2 — exposes the Prometheus exposition format. Configure
+    your Prometheus job to scrape ``/metrics`` (no auth; same trust
+    boundary as readiness). When prometheus_client isn't installed we
+    return a comment so scrapers don't error out."""
+    from app.core.metrics import render_metrics
+    body, content_type = render_metrics()
+    return Response(content=body, media_type=content_type)
+
+
 @router.get("/ready", summary="Readiness probe")
 async def ready(
     response: Response,

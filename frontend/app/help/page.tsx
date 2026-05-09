@@ -633,6 +633,131 @@ function BuildingWorkflows() {
         appears in the wizard with a schema-driven config form.
       </P>
 
+      <H2 id="durable-engine">The durable run engine</H2>
+      <P>
+        Workflow runs no longer execute inline inside the API process.
+        Each phase — <em>select → plan → tailor → execute → critique → publish</em> —
+        is its own job in <code>smms.jobs</code>, claimed by worker
+        coroutines using <code>FOR UPDATE SKIP LOCKED</code>. If a worker
+        crashes mid-run, the orphan-recovery sweep returns the job to
+        the queue so the run resumes from where it left off. Failures
+        retry with exponential backoff; permanent errors land in the
+        dead-letter queue.
+      </P>
+      <Bullets>
+        <li>
+          <strong>Run via the queue</strong> — the new{' '}
+          <code>POST /workflows/&#123;id&#125;/run-durable</code> endpoint enqueues
+          <code>run.start</code> and returns immediately. Use this for
+          production. The legacy <code>/run</code> endpoint is retained
+          for short dev-mode runs.
+        </li>
+        <li>
+          <strong>Per-platform circuit breakers</strong> — five consecutive
+          publish failures to a platform open the breaker for 60 seconds.
+          During that window, publish jobs fail fast (no API call) and
+          retry naturally on the queue's backoff schedule. State is shared
+          across workers via <code>smms.circuit_state</code>.
+        </li>
+        <li>
+          <strong>Per-tenant token bucket</strong> — a coarse cap on how
+          many phases an org can enqueue per second. Default 60 tokens at
+          1/sec. Stops one noisy customer from hogging the queue.
+        </li>
+        <li>
+          <strong>Admin job board</strong> — open <a href="/admin/jobs">/admin/jobs</a>
+          for live counters, status filters, retry / cancel buttons, and
+          a force-sweep for stuck jobs.
+        </li>
+      </Bullets>
+
+      <H2 id="observability">Observability spine</H2>
+      <P>
+        Three layers, all opt-in via env:
+      </P>
+      <Bullets>
+        <li>
+          <strong>OpenTelemetry traces</strong> — set{' '}
+          <code>OTEL_EXPORTER_OTLP_ENDPOINT</code> and traces flow to
+          your collector with one trace_id per run, spans per phase,
+          per publish, per LLM call.
+        </li>
+        <li>
+          <strong>Prometheus metrics</strong> — <code>GET /metrics</code>
+          exposes counters + histograms: runs started/completed, phase
+          duration, jobs by status, publish success rate, circuit state,
+          LLM tokens, engagement fetches.
+        </li>
+        <li>
+          <strong>Alerts</strong> — DLQ entries, exhausted retries, and
+          circuit trips dispatch through{' '}
+          <code>SMMS_ALERTS_SLACK_URL</code> /{' '}
+          <code>SMMS_ALERTS_WEBHOOK_URL</code> with a 5-minute dedupe
+          window so flaps don't page you 50 times.
+        </li>
+      </Bullets>
+
+      <H2 id="engagement-loop">Engagement feedback loop</H2>
+      <P>
+        After each publish, the runner schedules{' '}
+        <code>engagement.fetch</code> at T+1h and T+24h. The fetcher
+        calls the platform adapter's <code>get_metrics()</code> and
+        writes a row to <code>smms.post_metrics</code>. The aggregator
+        rolls those snapshots into per-(source, strategy, platform,
+        hour, weekday) summaries. The analytics page at{' '}
+        <a href="/analytics/engagement">/analytics/engagement</a>{' '}
+        ranks each dimension. The selection layer's new{' '}
+        <code>engagement_weighted</code> strategy biases ranking toward
+        sources whose past posts performed best.
+      </P>
+
+      <H2 id="knowledge-base">Brand-voice knowledge base</H2>
+      <P>
+        The KB at <a href="/knowledge">/knowledge</a> holds per-org
+        documents (brand examples, style guides, compliance docs, past
+        high-performing posts). On add, the document is chunked
+        paragraph-aware (~500-char chunks with 100-char overlap) and
+        embedded via the org's configured LLM. At generation time, the
+        Tailor + Execute phases query the KB and inject the top-K
+        relevant chunks into the prompt — every org's outputs get more
+        on-brand the more material the corpus has.
+      </P>
+
+      <H2 id="tailor-agent">Tailor agent — per-platform variants</H2>
+      <P>
+        For multi-platform workflows, a new <code>run.tailor</code> phase
+        slots between Plan and Execute. The Tailor agent rewrites the
+        plan summary in each platform's idiom (LinkedIn long-form,
+        X punchy, Instagram caption + hashtags, etc.), respects the
+        platform's character budget, pulls historical hashtags from
+        Hashtag Intelligence, retrieves brand-voice examples from the
+        KB, and skips platforms blocked by the workflow's compliance
+        profile. The Executor then generates a tailored draft per
+        platform; the Critique evaluates each.
+      </P>
+
+      <H2 id="plugin-sdk">Plugin SDK + marketplace</H2>
+      <P>
+        The <a href="/admin/plugins">/admin/plugins</a> page browses
+        every plugin in the loaded registry, grouped by kind, with
+        config-schema previews and a server-side validator. Authoring
+        a new plugin uses the <code>smms-plugin</code> CLI:
+      </P>
+      <pre className="text-xs bg-stone-50 border rounded p-2 overflow-x-auto"><code>{`# scaffold
+python backend/scripts/smms_plugin.py init source --name my_rss \\
+    --display "My RSS Reader"
+
+# validate
+python backend/scripts/smms_plugin.py validate ./plugins/my_rss
+
+# package for distribution
+python backend/scripts/smms_plugin.py package ./plugins/my_rss`}</code></pre>
+      <P>
+        Drop the directory under <code>backend/app/plugins/</code> (or any
+        package the manager scans), restart, and the plugin appears in
+        the marketplace + every relevant wizard picker.
+      </P>
+
       <H2 id="wf-context">Where the agent's behaviour comes from</H2>
       <P>
         Each draft is built from <strong>six</strong> stacked layers of context.

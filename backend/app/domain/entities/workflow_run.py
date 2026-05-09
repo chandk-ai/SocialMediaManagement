@@ -52,6 +52,12 @@ class WorkflowRun:
     directive: str = ""
     # The sender's identifier (phone, IG account, email) when triggered via a channel.
     initiator: str | None = None
+    # Phase state for the durable runner (Pillar 1). Each phase writes its
+    # output here so a re-claimed job can resume without re-running prior
+    # phases. Keys: 'selected_items', 'plan_output', 'tailor_variants',
+    # 'drafts', 'critique', 'review_session_id', 'post_ids'. Empty for
+    # legacy inline runs.
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def append(self, event: AgentTraceEvent) -> None:
         self.trace.append(event)

@@ -309,6 +309,162 @@ async def build_dev_workflow_service() -> WorkflowService:
     return get_workflow_service()
 
 
+# ── Durable run engine (Pillar 1) ─────────────────────────────────────────
+@lru_cache
+def _get_job_queue():
+    """Returns a JobQueue — Postgres-backed when on Supabase, in-memory
+    otherwise. Same pattern as the source-items service."""
+    settings = get_settings()
+    if settings.resolved_persistence_backend() == "supabase":
+        try:
+            from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+            from app.services.jobs.queue import PostgresJobQueue
+            engine = create_async_engine(
+                settings.db_url(),
+                pool_pre_ping=True,
+                connect_args=settings.db_connect_args(),
+            )
+            sm = async_sessionmaker(engine, expire_on_commit=False)
+            return PostgresJobQueue(sm)
+        except Exception:                                            # noqa: BLE001
+            log.warning("job_queue_supabase_init_failed_falling_back_memory")
+    from app.services.jobs.queue import InMemoryJobQueue
+    return InMemoryJobQueue()
+
+
+def get_job_queue():
+    return _get_job_queue()
+
+
+@lru_cache
+def _get_circuit_breaker():
+    settings = get_settings()
+    if settings.resolved_persistence_backend() == "supabase":
+        try:
+            from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+            from app.services.circuit_breaker import PostgresCircuitBreaker
+            engine = create_async_engine(
+                settings.db_url(), pool_pre_ping=True,
+                connect_args=settings.db_connect_args(),
+            )
+            sm = async_sessionmaker(engine, expire_on_commit=False)
+            return PostgresCircuitBreaker(sm)
+        except Exception:                                            # noqa: BLE001
+            log.warning("circuit_breaker_supabase_init_failed")
+    from app.services.circuit_breaker import InMemoryCircuitBreaker
+    return InMemoryCircuitBreaker()
+
+
+def get_circuit_breaker():
+    return _get_circuit_breaker()
+
+
+@lru_cache
+def _get_tenant_rate_limiter():
+    settings = get_settings()
+    if settings.resolved_persistence_backend() == "supabase":
+        try:
+            from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+            from app.services.tenant_rate_limiter import PostgresTenantRateLimiter
+            engine = create_async_engine(
+                settings.db_url(), pool_pre_ping=True,
+                connect_args=settings.db_connect_args(),
+            )
+            sm = async_sessionmaker(engine, expire_on_commit=False)
+            return PostgresTenantRateLimiter(sm)
+        except Exception:                                            # noqa: BLE001
+            log.warning("tenant_rate_limiter_supabase_init_failed")
+    from app.services.tenant_rate_limiter import InMemoryTenantRateLimiter
+    return InMemoryTenantRateLimiter()
+
+
+def get_tenant_rate_limiter():
+    return _get_tenant_rate_limiter()
+
+
+@lru_cache
+def _get_durable_runner():
+    """Builds the DurableWorkflowRunner using the same DI as
+    WorkflowService. Used by the queue worker handlers."""
+    repos = _build_repos()
+    from app.services.workflow_durable_runner import DurableWorkflowRunner
+    return DurableWorkflowRunner(
+        repo=repos["workflow"],
+        run_repo=repos["workflow_run"],
+        source_repo=repos["source"],
+        platform_repo=repos["platform"],
+        post_repo=repos["post"],
+        review_repo=repos.get("review"),
+        registry=get_registry(),
+        llm_credentials=get_llm_credentials_service(),
+        llm_usage=_get_llm_usage_service(),
+        source_items=get_source_items_service(),
+        circuit_breaker=get_circuit_breaker(),
+    )
+
+
+def get_durable_runner():
+    return _get_durable_runner()
+
+
+# ── Engagement service (Pillar 3) ─────────────────────────────────────────
+@lru_cache
+def _get_engagement_service():
+    """Pillar 3 service. Postgres on Supabase, in-memory otherwise."""
+    settings = get_settings()
+    repos = _build_repos()
+    if settings.resolved_persistence_backend() == "supabase":
+        try:
+            from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+            from app.services.engagement.service import PostgresEngagementService
+            engine = create_async_engine(
+                settings.db_url(), pool_pre_ping=True,
+                connect_args=settings.db_connect_args(),
+            )
+            sm = async_sessionmaker(engine, expire_on_commit=False)
+            return PostgresEngagementService(
+                sm, post_repo=repos["post"],
+                platform_repo=repos["platform"],
+                registry=get_registry(),
+            )
+        except Exception:                                            # noqa: BLE001
+            log.warning("engagement_service_supabase_init_failed")
+    from app.services.engagement.service import InMemoryEngagementService
+    return InMemoryEngagementService(
+        post_repo=repos["post"], platform_repo=repos["platform"],
+        registry=get_registry(),
+    )
+
+
+def get_engagement_service():
+    return _get_engagement_service()
+
+
+# ── Knowledge base (Pillar 4) ─────────────────────────────────────────────
+@lru_cache
+def _get_knowledge_store():
+    """Pillar 4 KB. Postgres+pgvector on Supabase, in-memory otherwise."""
+    settings = get_settings()
+    if settings.resolved_persistence_backend() == "supabase":
+        try:
+            from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+            from app.services.knowledge.store import PostgresKnowledgeStore
+            engine = create_async_engine(
+                settings.db_url(), pool_pre_ping=True,
+                connect_args=settings.db_connect_args(),
+            )
+            sm = async_sessionmaker(engine, expire_on_commit=False)
+            return PostgresKnowledgeStore(sm)
+        except Exception:                                            # noqa: BLE001
+            log.warning("knowledge_store_supabase_init_failed_falling_back_memory")
+    from app.services.knowledge.store import InMemoryKnowledgeStore
+    return InMemoryKnowledgeStore()
+
+
+def get_knowledge_store():
+    return _get_knowledge_store()
+
+
 # ── Advanced feature services ─────────────────────────────────────────────
 def get_campaign_service() -> CampaignService:
     repos = _build_repos()

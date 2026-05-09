@@ -30,3 +30,14 @@ def configure_tracing(app=None, settings: Settings | None = None) -> None:
     trace.set_tracer_provider(provider)
     if app is not None:
         FastAPIInstrumentor.instrument_app(app)
+
+    # Pillar 2 — also bind our core/tracing.py helper so trace_span()
+    # call sites pick up the same provider for non-FastAPI spans
+    # (workers, durable runner phases, agent calls).
+    try:
+        from app.core import tracing as core_tracing
+        core_tracing._INITIALISED = True            # type: ignore[attr-defined]
+        core_tracing._TRACER = trace.get_tracer("smms")  # type: ignore[attr-defined]
+        core_tracing.OTEL_AVAILABLE = True
+    except Exception:                                                 # noqa: BLE001
+        pass

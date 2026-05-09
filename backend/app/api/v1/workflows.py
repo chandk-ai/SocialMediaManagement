@@ -303,6 +303,41 @@ async def list_workflow_posts(
     } for p in posts[:limit]]
 
 
+@router.post("/{workflow_id}/run-durable")
+async def run_durable(
+    workflow_id: UUID,
+    user: Principal = Depends(current_user),
+) -> dict:
+    """Enqueue the workflow run on the durable queue. Returns
+    immediately with the job_id; the run progresses through phases as
+    the worker pool consumes the queue. Use ``/jobs?run_id=…`` to track
+    progress, or open the run detail page for the live trace.
+
+    Pillar 1's resilient path. Prefer this over ``/run`` for production
+    workloads — the inline ``/run`` endpoint blocks the API thread and
+    has no built-in retry."""
+    from app.api.deps import get_job_queue, get_tenant_rate_limiter
+    queue = get_job_queue()
+    limiter = get_tenant_rate_limiter()
+    if not await limiter.try_consume(user.org_id, cost=1.0):
+        raise HTTPException(
+            status_code=429,
+            detail="tenant rate limit exceeded — try again in a few seconds",
+        )
+    try:
+        job = await queue.enqueue(
+            "run.start", user.org_id,
+            {"workflow_id": str(workflow_id), "trigger_kind": "manual"},
+            idempotency_key=f"start:{workflow_id}:{user.id}",
+        )
+    except Exception as exc:                                         # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {
+        "job_id": job.id, "kind": job.kind, "status": job.status.value,
+        "scheduled_for": job.scheduled_for.isoformat(),
+    }
+
+
 @router.post("/{workflow_id}/run", response_model=WorkflowRunOut)
 async def run_now(
     workflow_id: UUID,
