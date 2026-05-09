@@ -390,7 +390,7 @@ def _get_durable_runner():
     from app.services.workflow_durable_runner import DurableWorkflowRunner
     return DurableWorkflowRunner(
         repo=repos["workflow"],
-        run_repo=repos["workflow_run"],
+        run_repo=repos["run"],
         source_repo=repos["source"],
         platform_repo=repos["platform"],
         post_repo=repos["post"],
