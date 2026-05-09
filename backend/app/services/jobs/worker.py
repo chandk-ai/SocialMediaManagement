@@ -34,6 +34,7 @@ from app.services.jobs.handlers import REGISTRY, HandlerContext
 from app.services.jobs.queue import (
     JobQueue, JobStatus, PermanentError, default_worker_id,
 )
+from app.services.jobs.system_scheduler import make_scheduler_from_queue
 
 log = get_logger(__name__)
 
@@ -62,6 +63,7 @@ class JobWorkerPool:
         self._running = False
         self._tasks: list[asyncio.Task] = []
         self._sweeper: asyncio.Task | None = None
+        self._scheduler = None  # SystemScheduler — set in start()
 
     async def start(self) -> None:
         if self._running:
@@ -75,6 +77,12 @@ class JobWorkerPool:
             ))
         self._sweeper = asyncio.create_task(self._sweep_loop(),
                                             name="job-orphan-sweeper")
+        # System scheduler — leader-elected via pg_advisory_lock so only
+        # one worker pool actually enqueues periodic jobs.
+        self._scheduler = make_scheduler_from_queue(self.queue)
+        if self._scheduler is not None:
+            await self._scheduler.start()
+            log.info("worker_system_scheduler_started")
 
     async def stop(self) -> None:
         if not self._running:
@@ -85,6 +93,8 @@ class JobWorkerPool:
             t.cancel()
         if self._sweeper:
             self._sweeper.cancel()
+        if self._scheduler is not None:
+            await self._scheduler.stop()
         for t in [*self._tasks, self._sweeper]:
             if t:
                 with contextlib.suppress(asyncio.CancelledError):
@@ -186,6 +196,16 @@ async def _amain() -> None:
     # Importing handlers registers them via decorator side-effect.
     from app.services.jobs import handlers_workflow  # noqa: F401
     from app.services.jobs import handlers_engagement  # noqa: F401
+    from app.services.jobs import handlers_system  # noqa: F401
+
+    # Boot tracing + Sentry early so worker spans show up alongside the
+    # API ones (same OTLP endpoint, same Sentry project).
+    try:
+        from app.core.tracing import init_tracing
+        init_tracing(service_name=os.environ.get(
+            "OTEL_SERVICE_NAME", "smms-worker"))
+    except Exception:                                                # noqa: BLE001
+        pass
 
     queue = await _build_queue_from_env()
     services = await _build_services_from_env()
@@ -214,9 +234,24 @@ async def _amain() -> None:
             pass
 
     await pool.start()
+
+    # Optional /healthz HTTP listener so platforms (Render, k8s, ECS) can
+    # probe the worker. Disabled by default; enable with SMMS_WORKERS_HTTP_PORT.
+    health_server = None
+    port = int(os.environ.get("SMMS_WORKERS_HTTP_PORT", "0") or "0")
+    if port > 0:
+        health_server = await _start_healthz(port, pool)
+        log.info("worker_healthz_listening", port=port)
+
     log.info("worker_main_ready")
     await stop.wait()
     await pool.stop()
+    if health_server is not None:
+        try:
+            health_server.close()
+            await health_server.wait_closed()
+        except Exception:                                            # noqa: BLE001
+            pass
     log.info("worker_main_done")
 
 
@@ -243,19 +278,108 @@ async def _build_queue_from_env() -> JobQueue:
     return InMemoryJobQueue()
 
 
+async def _start_healthz(port: int, pool):
+    """Tiny stdlib HTTP/1.1 listener exposing /healthz + /metrics. We
+    avoid pulling in FastAPI / aiohttp for the worker — that would
+    inflate the worker image with dependencies it doesn't need.
+
+    Returns the asyncio.Server so the caller can close() it on shutdown."""
+    import json as _json
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        try:
+            request_line = await asyncio.wait_for(reader.readline(), timeout=2.0)
+            if not request_line:
+                return
+            try:
+                method, path, _ = request_line.decode("ascii", "ignore").split(" ", 2)
+            except ValueError:
+                return
+            # Drain headers — we don't use them.
+            while True:
+                line = await asyncio.wait_for(reader.readline(), timeout=2.0)
+                if not line or line in (b"\r\n", b"\n"):
+                    break
+
+            if method != "GET":
+                _write_response(writer, 405, "text/plain", b"method not allowed\n")
+                return
+
+            if path.startswith("/healthz"):
+                running = pool._running and len(pool._tasks) > 0
+                body = _json.dumps({
+                    "status": "ok" if running else "stopped",
+                    "worker": pool.worker_id,
+                    "consumers": len(pool._tasks),
+                }).encode("utf-8")
+                _write_response(writer, 200 if running else 503,
+                                 "application/json", body)
+            elif path.startswith("/metrics"):
+                from app.core.metrics import render_metrics
+                body, ct = render_metrics()
+                _write_response(writer, 200,
+                                 ct.split(";")[0].strip(), body)
+            else:
+                _write_response(writer, 404, "text/plain", b"not found\n")
+        except (asyncio.TimeoutError, ConnectionResetError):
+            return
+        except Exception:                                            # noqa: BLE001
+            try:
+                _write_response(writer, 500, "text/plain", b"error\n")
+            except Exception:                                        # noqa: BLE001
+                pass
+        finally:
+            try:
+                await writer.drain()
+            except Exception:                                        # noqa: BLE001
+                pass
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:                                        # noqa: BLE001
+                pass
+
+    server = await asyncio.start_server(handle, "0.0.0.0", port)
+    return server
+
+
+def _write_response(writer, status: int, content_type: str, body: bytes) -> None:
+    reason = {200: "OK", 404: "Not Found", 405: "Method Not Allowed",
+              500: "Internal Server Error", 503: "Service Unavailable"}.get(status, "OK")
+    head = (
+        f"HTTP/1.1 {status} {reason}\r\n"
+        f"Content-Type: {content_type}\r\n"
+        f"Content-Length: {len(body)}\r\n"
+        "Connection: close\r\n\r\n"
+    ).encode("ascii")
+    writer.write(head + body)
+
+
 async def _build_services_from_env() -> dict[str, Any]:
     """Construct the handles a workflow handler would need. The worker
     is best thought of as a headless API process, so we wire the same
-    DI paths."""
+    DI paths the FastAPI deps use."""
     from app.api import deps
+
+    repos = deps._build_repos()                                      # type: ignore[attr-defined]
     return {
+        # Pillar 1 — durable runner is what handlers_workflow dispatches to.
+        "durable_runner": deps.get_durable_runner(),
+        # Legacy services — keep for compat / for handlers that still use them.
         "workflow_service": deps.get_workflow_service(),
         "post_service": deps.get_post_service(),
         "platform_service": deps.get_platform_service(),
         "source_service": deps.get_source_service(),
         "audit_log": deps.get_audit_log_service(),
-        "engagement_service": deps.get_engagement_service()
-            if hasattr(deps, "get_engagement_service") else None,
+        # Pillar 3.
+        "engagement_service": deps.get_engagement_service(),
+        # Pillar 4 — the auto-ingest handler reads this directly.
+        "knowledge_store": deps.get_knowledge_store(),
+        # Repos exposed so handlers_system can do raw SQL on them
+        # without re-resolving DI.
+        "post_repo": repos.get("post"),
+        "platform_repo": repos.get("platform"),
+        "workflow_repo": repos.get("workflow"),
     }
 
 

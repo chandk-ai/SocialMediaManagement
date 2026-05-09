@@ -72,6 +72,21 @@ services:
     environment: *backend-env
     depends_on: [backend, rabbitmq, redis]
 
+  # Pillar 1 — durable jobs worker. Drains smms.jobs (run phases,
+  # engagement.fetch, knowledge.auto_ingest, jobs.cleanup). Independent
+  # from the Celery worker above which handles the legacy publish DLQ.
+  jobs-worker:
+    build: ./backend
+    command: ["python", "-m", "app.services.jobs.worker"]
+    environment:
+      <<: *backend-env
+      SMMS_WORKERS_CONCURRENCY: "4"
+      SMMS_WORKERS_HTTP_PORT: "8080"
+      OTEL_SERVICE_NAME: smms-jobs-worker
+    depends_on:
+      postgres: { condition: service_healthy }
+    ports: ["8080:8080"]
+
   flower:
     image: mher/flower:2
     command: ["celery", "--broker=amqp://guest:guest@rabbitmq:5672//", "flower"]

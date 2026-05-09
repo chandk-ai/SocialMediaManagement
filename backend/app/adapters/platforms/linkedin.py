@@ -126,22 +126,45 @@ class LinkedInPlatform(SocialPlatform):
         )
 
     async def fetch_metrics(self, external_post_id: str) -> dict[str, Any]:
+        """Pull the post's reaction + comment counts. LinkedIn doesn't
+        expose share or impression counts on /socialActions for v2 UGC
+        posts (those live behind /organizationalEntityShareStatistics
+        which requires a different scope and only works for company
+        pages). We fetch what's available and normalise to the engagement
+        service's standard schema (likes / comments / shares / …)."""
         token = self._access_token()
         if not token or not external_post_id:
             return {}
-        # /rest/socialActions returns counts for likes / comments.
         try:
             async with httpx.AsyncClient(timeout=15.0, headers=self._headers(token)) as client:
                 r = await client.get(f"{LI_REST}/socialActions/{external_post_id}")
                 if r.status_code >= 400:
-                    return {}
+                    return {"fetch_error": f"linkedin_{r.status_code}"}
                 data = r.json()
         except httpx.HTTPError as exc:
             log.warning("linkedin_metrics_failed", error=str(exc))
-            return {}
+            return {"fetch_error": str(exc)[:200]}
+
+        likes = int((data.get("likesSummary") or {}).get("totalLikes") or 0)
+        comments = int(
+            (data.get("commentsSummary") or {}).get("totalFirstLevelComments") or 0,
+        )
         return {
-            "reactions": (data.get("likesSummary") or {}).get("totalLikes", 0),
-            "comments":  (data.get("commentsSummary") or {}).get("totalFirstLevelComments", 0),
+            "likes": likes,
+            "comments": comments,
+            # The remaining standard fields LinkedIn doesn't expose on
+            # this endpoint — leave None so the rollup ignores them
+            # rather than treating zero as "we measured zero shares."
+            "shares": None,
+            "impressions": None,
+            "reach": None,
+            "clicks": None,
+            "extra": {
+                "raw": {
+                    "likesSummary": data.get("likesSummary"),
+                    "commentsSummary": data.get("commentsSummary"),
+                },
+            },
         }
 
 

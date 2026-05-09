@@ -377,16 +377,24 @@ async def _adapter_fetch(
         if platform is None:
             return None
         from app.plugins.registry import PluginKind
-        adapter_cls = registry.get(PluginKind.PLATFORM, str(platform.kind))
+        entry = registry.get(PluginKind.PLATFORM, str(platform.kind))
+        adapter_cls = entry.cls if hasattr(entry, "cls") else entry
         if adapter_cls is None:
             return None
-        adapter = adapter_cls()
-        if not hasattr(adapter, "get_metrics"):
+        # Pass the OAuth credentials we already stored on the Platform
+        # entity. Adapters need this for any authenticated read; an
+        # unauthenticated adapter would 401 on every metrics fetch.
+        creds = getattr(platform, "credentials", None)
+        try:
+            adapter = adapter_cls(credentials=creds, config=getattr(platform, "config", None))
+        except TypeError:
+            # Adapters that take no kwargs.
+            adapter = adapter_cls()
+        ext_id = post.external_post_id
+        if not ext_id:
             return {"platform_kind": str(platform.kind),
-                    "fetch_error": "adapter has no get_metrics"}
-        snap = await adapter.get_metrics(
-            account=platform, external_id=post.external_post_id,
-        )
+                    "fetch_error": "no external_post_id"}
+        snap = await adapter.fetch_metrics(ext_id)
         snap = dict(snap or {})
         snap.setdefault("platform_kind", str(platform.kind))
         return snap

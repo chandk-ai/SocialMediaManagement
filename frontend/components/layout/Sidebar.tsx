@@ -30,12 +30,12 @@ import { usePathname } from 'next/navigation';
 import {
   LayoutDashboard, Workflow, Plug, Database, FileText, Settings,
   Zap, MessageSquare, BarChart3, Calendar, ScrollText, X, Sparkles,
-  BookOpen, Users,
+  BookOpen, Users, Activity, Package, TrendingUp,
   type LucideIcon,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
-type NavGroup = 'top' | 'setup' | 'operate' | 'insights' | 'help';
+type NavGroup = 'top' | 'setup' | 'operate' | 'insights' | 'admin' | 'help';
 
 type NavItem = {
   href: string;
@@ -60,8 +60,14 @@ const ITEMS: NavItem[] = [
   { href: '/reviews',       label: 'Reviews',     icon: MessageSquare,   group: 'operate' },
 
   // ── Insights (look back) ──
-  { href: '/analytics',     label: 'Analytics',   icon: BarChart3,       group: 'insights' },
-  { href: '/audit',         label: 'Audit log',   icon: ScrollText,      group: 'insights' },
+  { href: '/analytics',            label: 'Analytics',   icon: BarChart3,  group: 'insights' },
+  { href: '/analytics/engagement', label: 'Engagement',  icon: TrendingUp, group: 'insights' },
+  { href: '/knowledge',            label: 'Knowledge',   icon: BookOpen,   group: 'insights' },
+  { href: '/audit',                label: 'Audit log',   icon: ScrollText, group: 'insights' },
+
+  // ── Admin (operator-only — durable engine + plugin marketplace) ──
+  { href: '/admin/jobs',    label: 'Jobs',        icon: Activity,        group: 'admin' },
+  { href: '/admin/plugins', label: 'Plugins',     icon: Package,         group: 'admin' },
 
   // ── Help (admin + reference) ──
   { href: '/onboarding',    label: 'Get started', icon: Sparkles,        group: 'help' },
@@ -75,10 +81,11 @@ const GROUP_LABELS: Record<NavGroup, string | null> = {
   setup:    'Setup',
   operate:  'Operate',
   insights: 'Insights',
+  admin:    'Admin',
   help:     'Help',
 };
 
-const GROUP_ORDER: NavGroup[] = ['top', 'setup', 'operate', 'insights', 'help'];
+const GROUP_ORDER: NavGroup[] = ['top', 'setup', 'operate', 'insights', 'admin', 'help'];
 
 export function Sidebar({ mobileOpen = false, onMobileClose }: {
   mobileOpen?: boolean;

@@ -42,6 +42,7 @@ from typing import Any
 from uuid import UUID
 
 from app.adapters.platforms.base import PostPayload
+from app.agents.base import AgentDecision, AgentState
 from app.agents.factory import build_orchestrator
 from app.agents.source_loader import load_items
 from app.core.logging import get_logger
@@ -51,7 +52,9 @@ from app.domain.entities.post import Post, PostStatus
 from app.domain.entities.workflow_run import (
     AgentTraceEvent, RunStatus, WorkflowRun,
 )
-from app.domain.value_objects.content import DraftPost
+from app.domain.value_objects.content import (
+    ContentPlan, DraftPost, Hashtag, MediaAsset, MediaKind, PostBlueprint,
+)
 from app.domain.value_objects.ids import OrgId, RunId, WorkflowId
 from app.domain.value_objects.selection import ItemMode
 from app.plugins.registry import PluginKind
@@ -60,6 +63,82 @@ from app.services.jobs.queue import PermanentError
 from app.services.selection.base import SelectionContext
 
 log = get_logger(__name__)
+
+
+# ── ContentPlan / DraftPost serialization (round-trip via run.metadata) ──
+def _plan_to_dict(plan: ContentPlan) -> dict[str, Any]:
+    return {
+        "rationale": plan.rationale,
+        "source_summary": plan.source_summary,
+        "blueprints": [_bp_to_dict(b) for b in plan.blueprints],
+    }
+
+
+def _plan_from_dict(d: dict[str, Any]) -> ContentPlan:
+    return ContentPlan(
+        rationale=d.get("rationale", ""),
+        source_summary=d.get("source_summary", ""),
+        blueprints=[_bp_from_dict(b) for b in (d.get("blueprints") or [])],
+    )
+
+
+def _bp_to_dict(bp: PostBlueprint) -> dict[str, Any]:
+    return {
+        "platform_name": bp.platform_name,
+        "angle": bp.angle, "hook": bp.hook,
+        "key_messages": list(bp.key_messages),
+        "cta": bp.cta,
+        "hashtags": [h.value for h in bp.hashtags],
+        "media_prompt": bp.media_prompt,
+        "media_kind": bp.media_kind.value if bp.media_kind else None,
+        "notes": bp.notes,
+    }
+
+
+def _bp_from_dict(d: dict[str, Any]) -> PostBlueprint:
+    return PostBlueprint(
+        platform_name=d.get("platform_name", ""),
+        angle=d.get("angle", ""), hook=d.get("hook", ""),
+        key_messages=list(d.get("key_messages") or []),
+        cta=d.get("cta"),
+        hashtags=[Hashtag(value=v) for v in (d.get("hashtags") or [])],
+        suggested_media=None,
+        media_prompt=d.get("media_prompt"),
+        media_kind=MediaKind(d["media_kind"]) if d.get("media_kind") else None,
+        notes=d.get("notes"),
+    )
+
+
+def _draft_to_dict(d: DraftPost) -> dict[str, Any]:
+    return {
+        "platform_name": d.platform_name,
+        "text": d.text,
+        "hashtags": [h.value for h in d.hashtags],
+        "media": [
+            {"url": m.url, "kind": m.kind.value if m.kind else None,
+             "alt_text": getattr(m, "alt_text", None)}
+            for m in (d.media or [])
+        ],
+        "blueprint_ref": _bp_to_dict(d.blueprint_ref) if d.blueprint_ref else None,
+    }
+
+
+def _draft_from_dict(d: dict[str, Any]) -> DraftPost:
+    return DraftPost(
+        platform_name=d.get("platform_name", ""),
+        text=d.get("text", ""),
+        hashtags=[Hashtag(value=v) for v in (d.get("hashtags") or [])],
+        media=[
+            MediaAsset(
+                url=m.get("url", ""),
+                kind=MediaKind(m["kind"]) if m.get("kind") else MediaKind.IMAGE,
+                alt_text=m.get("alt_text"),
+            )
+            for m in (d.get("media") or [])
+            if m.get("url")
+        ],
+        blueprint_ref=_bp_from_dict(d["blueprint_ref"]) if d.get("blueprint_ref") else None,
+    )
 
 
 @dataclass(slots=True)
@@ -98,6 +177,9 @@ class DurableWorkflowRunner:
         self.breaker = circuit_breaker
         # Pillar 4 — knowledge store wired in lazily; see _kb_context().
         self.knowledge_store = None
+        # Per-run api_key cache — phases reuse the same decrypted key so
+        # we don't hit the credentials store 5x per run.
+        self._cached_api_key: dict[str, str | None] = {}
 
     # ── public API exposed to the job handlers ─────────────────────
     async def create_run_for_job(
@@ -268,20 +350,11 @@ class DurableWorkflowRunner:
         ]
         run.metadata["selection_mode"] = result.mode.value
 
-        # Atomic claim-on-select if we have the registry.
-        if self.source_items is not None:
-            try:
-                claimed = await self.source_items.claim_for_run(
-                    run.org_id, run.id,
-                    [(SourceId_or_none(d["source_id"]), d["external_id"])
-                     for d in run.metadata["selected_items"]
-                     if d["source_id"]],
-                )
-                run.metadata["claimed_keys"] = list(claimed)
-            except AttributeError:
-                pass  # method optional on some impls
-            except Exception as exc:                                 # noqa: BLE001
-                log.warning("durable_claim_failed", error=str(exc))
+        # Atomic claim-on-select happens via mark_consumed in _phase_publish
+        # once we have a real Post id to attribute consumption to. The
+        # consumed_keys filter above + idempotency-key on the select job
+        # together prevent the same run from re-selecting an item even if
+        # its job retries.
 
         return PhaseResult(
             next_phase="plan",
@@ -291,79 +364,64 @@ class DurableWorkflowRunner:
     # ── phase: plan ────────────────────────────────────────────────
     async def _phase_plan(self, run: WorkflowRun, wf) -> PhaseResult:
         run.transition(RunStatus.PLANNING)
-        api_key = await self._resolve_llm_api_key(
-            run.org_id, wf.config.llm_provider)
-        orch = build_orchestrator(
-            wf, self.registry, api_key=api_key,
-            org_id=run.org_id, usage_service=self.llm_usage,
-            usage_context={
-                "workflow_id": str(wf.id),
-                "run_id": str(run.id), "trigger": "plan",
-            },
-        )
-        items = self._items_from_metadata(run)
-        plan = await orch.planner.plan(
-            workflow=wf, items=items, directive=run.directive or None,
-        )
-        run.metadata["plan_output"] = {
-            "summary": plan.summary if hasattr(plan, "summary") else "",
-            "outline": getattr(plan, "outline", None),
-            "calls_to_action": getattr(plan, "calls_to_action", []),
-            "raw": getattr(plan, "raw", None),
-        }
+        orch = self._build_orchestrator(run, wf, trigger="plan")
+        state = await self._build_state(run, wf,
+                                          target_platforms=await self._target_platform_kinds(wf))
+        state = await orch.planner.run(state)
+        if state.plan is None:
+            run.transition(RunStatus.FAILED)
+            run.error = "planner produced no plan"
+            return PhaseResult(done=True, extras={"reason": "no_plan"})
+
+        run.metadata["plan"] = _plan_to_dict(state.plan)
         run.append(AgentTraceEvent(
             agent="planner", event="plan_complete",
-            payload={"summary": str(run.metadata["plan_output"]["summary"])[:300]},
+            payload={
+                "blueprint_count": len(state.plan.blueprints),
+                "platforms": [b.platform_name for b in state.plan.blueprints],
+                "summary": (state.plan.source_summary or "")[:300],
+            },
         ))
 
-        # Multi-platform = need Tailor pass.
-        multi = len(wf.platform_ids) > 1
+        # Tailor only worth running with >1 platform OR a compliance
+        # profile that might filter platforms.
+        multi = len(state.plan.blueprints) > 1
+        has_compliance = bool(getattr(wf.config, "compliance_profile", None))
         return PhaseResult(
-            next_phase="tailor" if multi else "execute",
-            extras={"multi_platform": multi},
+            next_phase="tailor" if (multi or has_compliance) else "execute",
+            extras={
+                "multi_platform": multi,
+                "blueprint_count": len(state.plan.blueprints),
+            },
         )
 
     # ── phase: tailor (Pillar 5) ───────────────────────────────────
     async def _phase_tailor(self, run: WorkflowRun, wf) -> PhaseResult:
-        """Per-platform variant generation. Uses the full TailorAgent
-        with KB injection, hashtag intelligence, and compliance
-        denylisting; falls back to the lightweight helper if any of
-        those services aren't wired."""
-        api_key = await self._resolve_llm_api_key(
-            run.org_id, wf.config.llm_provider)
-        orch = build_orchestrator(
-            wf, self.registry, api_key=api_key,
-            org_id=run.org_id, usage_service=self.llm_usage,
-            usage_context={
-                "workflow_id": str(wf.id),
-                "run_id": str(run.id), "trigger": "tailor",
-            },
-        )
+        """Refine each PostBlueprint per platform's idiom + brand voice.
+        Compliance-skipped platforms are *removed* from the plan so
+        downstream phases never produce drafts for them."""
+        plan_dict = run.metadata.get("plan")
+        if not plan_dict:
+            run.transition(RunStatus.FAILED)
+            run.error = "tailor: missing plan from prior phase"
+            return PhaseResult(done=True, extras={"reason": "no_plan"})
 
-        # Resolve platform-kind list for the workflow's platforms.
-        platform_kinds: list[str] = []
-        for pid in wf.platform_ids:
-            try:
-                p = await self.platform_repo.get(pid)
-                if p:
-                    platform_kinds.append(str(p.kind))
-            except Exception:                                        # noqa: BLE001
-                pass
-        if not platform_kinds:
-            platform_kinds = [str(p) for p in wf.platform_ids]
+        plan = _plan_from_dict(plan_dict)
+        orch = self._build_orchestrator(run, wf, trigger="tailor")
 
         # Lazy services.
+        kb = None
+        hashtag_svc = None
         try:
-            from app.api.deps import (
-                get_knowledge_store, get_hashtag_intelligence_service,
-            )
+            from app.api.deps import get_knowledge_store
             kb = get_knowledge_store()
         except Exception:                                            # noqa: BLE001
-            kb = None
+            pass
         try:
+            from app.api.deps import get_hashtag_intelligence_service
             hashtag_svc = get_hashtag_intelligence_service()
         except Exception:                                            # noqa: BLE001
-            hashtag_svc = None
+            pass
 
         from app.agents.tailor_agent import TailorAgent
         agent = TailorAgent(
@@ -371,180 +429,184 @@ class DurableWorkflowRunner:
             hashtag_service=hashtag_svc,
             knowledge_store=kb,
         )
-        plan = run.metadata.get("plan_output", {})
-        variants = await agent.tailor(
-            plan=plan, platforms=platform_kinds,
-            workflow_config=wf.config, org_id=str(run.org_id),
+        refined, telemetry = await agent.refine(
+            plan=plan, workflow_config=wf.config,
+            org_id=str(run.org_id),
             directive=run.directive or None,
         )
 
-        run.metadata["tailor_variants"] = variants
+        if not refined.blueprints:
+            run.transition(RunStatus.SUCCEEDED)
+            run.error = "tailor removed every platform (compliance)"
+            return PhaseResult(
+                done=True,
+                extras={"reason": "all_compliance_skipped",
+                         **telemetry},
+            )
+
+        run.metadata["plan"] = _plan_to_dict(refined)
+        run.metadata["tailor_telemetry"] = telemetry
         run.append(AgentTraceEvent(
-            agent="tailor", event="variants_generated",
-            payload={
-                "count": len(variants),
-                "platforms": list(variants.keys()),
-                "rewritten": [k for k, v in variants.items()
-                               if v.get("rewritten")],
-                "compliance_skipped": [k for k, v in variants.items()
-                                        if v.get("compliance_skip")],
-            },
+            agent="tailor", event="plan_refined", payload=telemetry,
         ))
         return PhaseResult(next_phase="execute",
-                           extras={"variants": len(variants)})
+                           extras=dict(telemetry))
 
     # ── phase: execute ─────────────────────────────────────────────
     async def _phase_execute(self, run: WorkflowRun, wf) -> PhaseResult:
         run.transition(RunStatus.EXECUTING)
-        api_key = await self._resolve_llm_api_key(
-            run.org_id, wf.config.llm_provider)
-        orch = build_orchestrator(
-            wf, self.registry, api_key=api_key,
-            org_id=run.org_id, usage_service=self.llm_usage,
-            usage_context={
-                "workflow_id": str(wf.id),
-                "run_id": str(run.id), "trigger": "execute",
-            },
-        )
-        items = self._items_from_metadata(run)
+        plan_dict = run.metadata.get("plan")
+        if not plan_dict:
+            run.transition(RunStatus.FAILED)
+            run.error = "execute: missing plan from prior phase"
+            return PhaseResult(done=True, extras={"reason": "no_plan"})
 
-        # Pillar 4 — RAG retrieval. Build a query from the directive +
-        # the plan summary, fetch the most relevant brand-voice chunks,
-        # and stash on the run for the Executor's prompt.
+        plan = _plan_from_dict(plan_dict)
+        orch = self._build_orchestrator(run, wf, trigger="execute")
+
+        # Pillar 4 — RAG retrieval. Build a query from directive +
+        # source_summary, ask the KB for top-K chunks, splice the
+        # formatted block into ``state.voice_block`` so the existing
+        # Executor prompt-builder picks it up automatically.
         kb_query = " ".join(filter(None, [
             run.directive or "",
-            (run.metadata.get("plan_output") or {}).get("summary") or "",
+            plan.source_summary or "",
+            *[bp.angle for bp in plan.blueprints[:3]],
         ])).strip()
+        voice_block = ""
         if kb_query:
-            kb_block = await self._kb_context(
+            voice_block = await self._kb_context(
                 org_id=run.org_id, query=kb_query,
                 llm=orch.executor.llm,
             )
-            if kb_block:
-                run.metadata["kb_context"] = kb_block
+            if voice_block:
+                run.metadata["kb_context_chars"] = len(voice_block)
                 run.append(AgentTraceEvent(
                     agent="kb", event="rag_retrieved",
-                    payload={"chars": len(kb_block)},
+                    payload={"chars": len(voice_block)},
                 ))
 
-        variants = run.metadata.get("tailor_variants") or {}
-        drafts: list[dict[str, Any]] = []
-        if variants:
-            # Per-platform drafts produced by Tailor.
-            for plat_key, variant in variants.items():
-                d = await orch.executor.execute(
-                    workflow=wf, items=items,
-                    plan=variant.get("plan") or run.metadata.get("plan_output"),
-                    platform_hint=plat_key,
-                    directive=run.directive or None,
-                )
-                drafts.append({"platform": plat_key,
-                                "title": d.title, "body": d.body,
-                                "media_urls": list(getattr(d, "media_urls", []) or [])})
-        else:
-            # Single-platform path or fallback.
-            d = await orch.executor.execute(
-                workflow=wf, items=items,
-                plan=run.metadata.get("plan_output"),
-                directive=run.directive or None,
-            )
-            drafts.append({
-                "platform": None,
-                "title": d.title, "body": d.body,
-                "media_urls": list(getattr(d, "media_urls", []) or []),
-            })
+        state = await self._build_state(
+            run, wf, target_platforms=[bp.platform_name for bp in plan.blueprints],
+            plan=plan, voice_block=voice_block,
+        )
+        state = await orch.executor.run(state)
 
-        run.metadata["drafts"] = drafts
+        run.metadata["drafts"] = [_draft_to_dict(d) for d in state.drafts]
         run.append(AgentTraceEvent(
             agent="executor", event="drafts_complete",
-            payload={"count": len(drafts)},
+            payload={
+                "count": len(state.drafts),
+                "platforms": [d.platform_name for d in state.drafts],
+            },
         ))
         return PhaseResult(next_phase="critique",
-                           extras={"count": len(drafts)})
+                           extras={"count": len(state.drafts)})
 
     # ── phase: critique ────────────────────────────────────────────
     async def _phase_critique(self, run: WorkflowRun, wf) -> PhaseResult:
+        """Run Evaluator + Critique on the assembled drafts. The
+        existing agents work on the same AgentState; we hand them
+        a state with .plan and .drafts populated."""
         run.transition(RunStatus.CRITIQUING)
-        api_key = await self._resolve_llm_api_key(
-            run.org_id, wf.config.llm_provider)
-        orch = build_orchestrator(
-            wf, self.registry, api_key=api_key,
-            org_id=run.org_id, usage_service=self.llm_usage,
-            usage_context={
-                "workflow_id": str(wf.id),
-                "run_id": str(run.id), "trigger": "critique",
-            },
+
+        plan_dict = run.metadata.get("plan")
+        drafts_dicts = run.metadata.get("drafts") or []
+        if not plan_dict or not drafts_dicts:
+            run.transition(RunStatus.FAILED)
+            run.error = "critique: missing plan or drafts"
+            return PhaseResult(done=True, extras={"reason": "no_input"})
+
+        plan = _plan_from_dict(plan_dict)
+        drafts = [_draft_from_dict(d) for d in drafts_dicts]
+        orch = self._build_orchestrator(run, wf, trigger="critique")
+
+        state = await self._build_state(
+            run, wf,
+            target_platforms=[d.platform_name for d in drafts],
+            plan=plan, drafts=drafts,
+            critique_notes=list(run.metadata.get("critique_notes") or []),
+            revision_count=int(run.metadata.get("rerun_count", 0)),
         )
-        drafts = run.metadata.get("drafts") or []
-        decisions: list[dict] = []
-        for draft in drafts:
-            dp = DraftPost(
-                title=draft.get("title", ""), body=draft.get("body", ""),
-                media_urls=draft.get("media_urls") or [],
-            )
-            decision = await orch.critique.review(
-                workflow=wf, draft=dp,
-                directive=run.directive or None,
-            )
-            decisions.append({
-                "platform": draft.get("platform"),
-                "approved": getattr(decision, "approved", False),
-                "needs_human": getattr(decision, "needs_human", False),
-                "rerun": getattr(decision, "rerun", False),
-                "feedback": getattr(decision, "feedback", ""),
-                "flags": list(getattr(decision, "flags", []) or []),
-            })
-        run.metadata["critique"] = decisions
+        state = await orch.evaluator.run(state)
+        state = await orch.critique.run(state)
 
-        any_human = any(d["needs_human"] for d in decisions)
-        any_rerun = any(d["rerun"] for d in decisions)
-        all_approved = all(d["approved"] for d in decisions)
+        # Persist evaluator output for the trace + the dashboard.
+        run.metadata["evaluations"] = [
+            {"platform_name": e.platform_name,
+             "score": float(e.score),
+             "flags": list(getattr(e, "flags", []) or []),
+             "notes": getattr(e, "notes", "") or ""}
+            for e in state.evaluations
+        ]
+        run.metadata["critique_notes"] = list(state.critique_notes)
+        decision = state.decision
 
-        if any_human:
+        run.append(AgentTraceEvent(
+            agent="critique", event="decision",
+            payload={
+                "decision": decision.value if decision else "none",
+                "evaluations": run.metadata["evaluations"],
+                "notes_count": len(state.critique_notes),
+            },
+        ))
+
+        if decision is AgentDecision.ESCALATE:
             run.transition(RunStatus.AWAITING_REVIEW)
-            run.append(AgentTraceEvent(
-                agent="critique", event="needs_review",
-                payload={"flags": [f for d in decisions for f in d["flags"]]},
-            ))
             return PhaseResult(extras={"requires_review": True})
 
-        if any_rerun:
+        if decision is AgentDecision.REVISE:
             count = int(run.metadata.get("rerun_count", 0)) + 1
             run.metadata["rerun_count"] = count
-            if count > 3:
+            max_revisions = int(getattr(wf.config, "max_revisions", 3) or 3)
+            if count > max_revisions:
                 run.transition(RunStatus.FAILED)
-                run.error = "exhausted reruns"
-                return PhaseResult(done=True, extras={"reason": "rerun-exhausted"})
-            return PhaseResult(next_phase="plan",
-                               extras={"rerun": True, "rerun_count": count})
+                run.error = f"exhausted {max_revisions} revisions"
+                return PhaseResult(done=True,
+                                    extras={"reason": "rerun_exhausted"})
+            # Re-execute with the critique notes — Plan stays the same,
+            # only Executor reruns.
+            return PhaseResult(next_phase="execute",
+                                extras={"rerun": True,
+                                        "rerun_count": count})
 
-        if all_approved:
-            return PhaseResult(next_phase="publish")
+        if decision is AgentDecision.ABORT:
+            run.transition(RunStatus.FAILED)
+            run.error = "critique aborted run"
+            return PhaseResult(done=True, extras={"reason": "aborted"})
 
-        run.transition(RunStatus.FAILED)
-        run.error = "critique rejected without rerun signal"
-        return PhaseResult(done=True, extras={"reason": "rejected"})
+        # APPROVE (or None — accepts)
+        return PhaseResult(next_phase="publish")
 
     # ── phase: publish ─────────────────────────────────────────────
     async def _phase_publish(self, run: WorkflowRun, wf) -> PhaseResult:
         run.transition(RunStatus.PUBLISHING)
-        drafts = run.metadata.get("drafts") or []
+        drafts_dicts = run.metadata.get("drafts") or []
+        already_published = set(run.metadata.get("post_ids") or [])
+        drafts = [_draft_from_dict(d) for d in drafts_dicts]
         platforms = await self._load_platforms(wf, run.org_id)
-        post_ids: list[str] = []
+        post_ids: list[str] = list(already_published)
+
         for draft in drafts:
-            target = self._match_platform(draft, platforms)
+            # Skip drafts whose post is already in run.metadata['post_ids']
+            # (publish is per-platform; partial retry must not double-post).
+            if draft.platform_name in run.metadata.get("published_platforms", []):
+                continue
+            target = self._match_platform_for_draft(draft, platforms)
             if target is None:
                 run.append(AgentTraceEvent(
                     agent="publisher", event="no_target_platform",
-                    payload={"draft_platform": draft.get("platform")},
+                    payload={"draft_platform": draft.platform_name},
                 ))
                 continue
             try:
                 post = await self._publish_one(run, wf, draft, target)
                 post_ids.append(str(post.id))
+                run.metadata.setdefault("published_platforms", []).append(
+                    draft.platform_name)
             except CircuitOpen as exc:
                 # Re-raise → worker retries. Already-published drafts
-                # are saved so the retry only handles the rest.
+                # remain marked so the retry only handles the rest.
                 run.append(AgentTraceEvent(
                     agent="publisher", event="circuit_open_skip",
                     payload={"target": exc.target},
@@ -622,16 +684,75 @@ class DurableWorkflowRunner:
                 pass
         return plats
 
-    def _match_platform(self, draft, platforms):
-        target = draft.get("platform")
-        if not target:
-            return platforms[0] if platforms else None
-        for p in platforms:
-            if str(p.kind) == target or p.id == target:
-                return p
-        return platforms[0] if platforms else None
+    async def _target_platform_kinds(self, wf) -> list[str]:
+        """Resolve plugin-name strings for the workflow's platforms.
+        Falls back to the raw platform_id strings if a platform row is
+        missing — Planner will skip those Blueprints."""
+        kinds: list[str] = []
+        for pid in wf.platform_ids:
+            try:
+                p = await self.platform_repo.get(pid)
+                if p:
+                    kinds.append(str(p.kind))
+            except Exception:                                        # noqa: BLE001
+                pass
+        return kinds or [str(p) for p in wf.platform_ids]
 
-    async def _publish_one(self, run, wf, draft, target_platform):
+    def _match_platform_for_draft(self, draft: DraftPost, platforms):
+        if not platforms:
+            return None
+        for p in platforms:
+            if str(p.kind) == draft.platform_name:
+                return p
+        # Fall back to the first platform if the kind doesn't line up.
+        return platforms[0]
+
+    def _build_orchestrator(self, run: WorkflowRun, wf, *, trigger: str):
+        # Bridge sync wrapper since the inner factory doesn't await on
+        # api_key resolution; the caller does that ahead of time.
+        # (Kept as a class helper so subclasses can swap.)
+        api_key = self._cached_api_key.get(str(run.id))
+        if api_key is None and self.llm_credentials is not None:
+            # Phase methods are async — they can resolve directly.
+            raise RuntimeError("call _resolve_api_key_for_run before _build_orchestrator")
+        return build_orchestrator(
+            wf, self.registry, api_key=api_key,
+            org_id=run.org_id, usage_service=self.llm_usage,
+            usage_context={
+                "workflow_id": str(wf.id),
+                "run_id": str(run.id), "trigger": trigger,
+            },
+        )
+
+    async def _build_state(
+        self, run: WorkflowRun, wf, *,
+        target_platforms: list[str],
+        plan: ContentPlan | None = None,
+        drafts: list[DraftPost] | None = None,
+        voice_block: str = "",
+        critique_notes: list[str] | None = None,
+        revision_count: int = 0,
+    ) -> AgentState:
+        items = self._items_from_metadata(run)
+        # Cache the api_key per run so multi-step phases share the
+        # same orchestrator construction without re-decrypting.
+        if str(run.id) not in self._cached_api_key:
+            self._cached_api_key[str(run.id)] = await self._resolve_llm_api_key(
+                run.org_id, wf.config.llm_provider,
+            )
+        return AgentState(
+            workflow_config=wf.config,
+            target_platforms=target_platforms,
+            source_items=items,
+            plan=plan,
+            drafts=list(drafts) if drafts else [],
+            critique_notes=list(critique_notes or []),
+            revision_count=int(revision_count),
+            directive=run.directive or "",
+            voice_block=voice_block or "",
+        )
+
+    async def _publish_one(self, run, wf, draft: DraftPost, target_platform):
         breaker = self.breaker
         org_id = str(run.org_id)
         kind = "platform"
@@ -642,10 +763,22 @@ class DurableWorkflowRunner:
             if adapter_cls is None:
                 raise PermanentError(f"no adapter for platform {plat_key}")
             adapter = adapter_cls()
+            # Append hashtag block after a blank line — same convention
+            # the inline path uses (PostPayload.content is the literal
+            # text the platform receives).
+            body_with_tags = draft.text
+            if draft.hashtags:
+                body_with_tags = (
+                    draft.text.rstrip()
+                    + "\n\n"
+                    + " ".join(h.value for h in draft.hashtags)
+                )
+            media_urls = [m.url for m in (draft.media or []) if getattr(m, "url", None)]
             payload = PostPayload(
-                content=draft.get("body", ""),
-                title=draft.get("title", ""),
-                media_urls=draft.get("media_urls") or [],
+                content=body_with_tags,
+                title=getattr(draft.blueprint_ref, "angle", "")[:120]
+                      if draft.blueprint_ref else "",
+                media_urls=media_urls,
             )
             return await adapter.publish(payload, account=target_platform)
 
@@ -674,12 +807,20 @@ class DurableWorkflowRunner:
                         platform=plat_key, status="error").inc()
                     raise
 
-        # Persist Post.
+        # Persist Post — record what we actually sent (incl. hashtags).
+        body_with_tags = draft.text
+        if draft.hashtags:
+            body_with_tags = (
+                draft.text.rstrip()
+                + "\n\n"
+                + " ".join(h.value for h in draft.hashtags)
+            )
         post = Post.create(
             org_id=run.org_id, workflow_id=wf.id,
             platform_id=target_platform.id, run_id=run.id,
-            content=draft.get("body", ""), title=draft.get("title", ""),
-            media_urls=list(draft.get("media_urls") or []),
+            content=body_with_tags,
+            title=(getattr(draft.blueprint_ref, "angle", "") or "")[:120],
+            media_urls=[m.url for m in (draft.media or []) if getattr(m, "url", None)],
         )
         post.status = PostStatus.PUBLISHED
         post.external_url = getattr(result, "url", None)
@@ -687,10 +828,3 @@ class DurableWorkflowRunner:
         return post
 
 
-def SourceId_or_none(s: str):
-    """Best-effort coerce string-uuid to SourceId, else return None."""
-    from app.domain.value_objects.ids import SourceId
-    try:
-        return SourceId(UUID(s))
-    except Exception:                                                # noqa: BLE001
-        return None

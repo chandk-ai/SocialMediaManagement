@@ -143,30 +143,58 @@ class InstagramPlatform(SocialPlatform):
         )
 
     async def fetch_metrics(self, external_post_id: str) -> dict[str, Any]:
+        """Pull insights for an IG media. Two API calls — /insights for
+        impressions/reach/saved/interactions, and the media node itself
+        for like_count/comments_count which Insights doesn't return.
+        Maps to the engagement service's standard schema."""
         token = self._token()
         if not token or not external_post_id:
             return {}
-        # Insights for IG media: impressions, reach, saved, total_interactions
+
+        insights: dict[str, Any] = {}
+        node: dict[str, Any] = {}
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
-                r = await client.get(
+                # Insights — impressions/reach/saved/total_interactions.
+                ri = await client.get(
                     f"{GRAPH_API}/{external_post_id}/insights",
                     params={
                         "metric": "impressions,reach,saved,total_interactions",
                         "access_token": token,
                     },
                 )
-                r.raise_for_status()
-                data = r.json()
+                if ri.status_code < 400:
+                    for entry in ri.json().get("data", []):
+                        values = entry.get("values") or []
+                        if values:
+                            insights[entry.get("name", "")] = values[-1].get(
+                                "value", 0)
+
+                # Media node — like_count + comments_count.
+                rn = await client.get(
+                    f"{GRAPH_API}/{external_post_id}",
+                    params={
+                        "fields": "like_count,comments_count,media_type",
+                        "access_token": token,
+                    },
+                )
+                if rn.status_code < 400:
+                    node = rn.json() or {}
         except httpx.HTTPError as exc:
             log.warning("instagram_metrics_failed", error=str(exc))
-            return {}
-        out: dict[str, Any] = {}
-        for entry in data.get("data", []):
-            values = entry.get("values", [])
-            if values:
-                out[entry.get("name", "")] = values[-1].get("value", 0)
-        return out
+            return {"fetch_error": str(exc)[:200]}
+
+        return {
+            "likes":       int(node.get("like_count") or 0),
+            "comments":    int(node.get("comments_count") or 0),
+            "saves":       int(insights.get("saved") or 0),
+            "impressions": int(insights.get("impressions") or 0),
+            "reach":       int(insights.get("reach") or 0),
+            "extra": {
+                "total_interactions": int(insights.get("total_interactions") or 0),
+                "media_type": node.get("media_type"),
+            },
+        }
 
 
 async def _wait_for_container(

@@ -88,6 +88,11 @@ class TwitterPlatform(SocialPlatform):
         )
 
     async def fetch_metrics(self, external_post_id: str) -> dict[str, Any]:
+        """Pull public_metrics for the tweet. X v2 reliably returns
+        impression_count, like_count, retweet_count, reply_count,
+        quote_count, bookmark_count for posts authored by the
+        authenticated user (a separate non_public_metrics endpoint
+        gives view counts but requires elevated access)."""
         token = self._access_token()
         if not token or not external_post_id:
             return {}
@@ -99,18 +104,24 @@ class TwitterPlatform(SocialPlatform):
                     params={"tweet.fields": "public_metrics"},
                 )
                 if r.status_code >= 400:
-                    return {}
+                    return {"fetch_error": f"x_{r.status_code}"}
                 m = (r.json().get("data") or {}).get("public_metrics") or {}
         except httpx.HTTPError as exc:
             log.warning("twitter_metrics_failed", error=str(exc))
-            return {}
+            return {"fetch_error": str(exc)[:200]}
+        # Normalised to the engagement service's snapshot schema:
+        # likes/comments/shares/impressions are first-class columns;
+        # quotes + bookmarks live in `extra` for platform-aware analytics.
         return {
-            "impressions": m.get("impression_count", 0),
-            "likes": m.get("like_count", 0),
-            "reposts": m.get("retweet_count", 0),
-            "replies": m.get("reply_count", 0),
-            "quotes": m.get("quote_count", 0),
-            "bookmarks": m.get("bookmark_count", 0),
+            "likes":       int(m.get("like_count")  or 0),
+            "comments":    int(m.get("reply_count") or 0),
+            "shares":      int(m.get("retweet_count") or 0),
+            "impressions": int(m.get("impression_count") or 0),
+            "saves":       int(m.get("bookmark_count") or 0),
+            "extra": {
+                "quotes":   int(m.get("quote_count") or 0),
+                "raw":      m,
+            },
         }
 
     async def delete(self, external_post_id: str) -> bool:

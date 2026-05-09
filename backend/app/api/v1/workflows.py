@@ -338,35 +338,110 @@ async def run_durable(
     }
 
 
-@router.post("/{workflow_id}/run", response_model=WorkflowRunOut)
+@router.post("/{workflow_id}/run")
 async def run_now(
     workflow_id: UUID,
     background: BackgroundTasks,
+    mode: str = "auto",
     user: Principal = Depends(current_user),
     svc: WorkflowService = Depends(get_workflow_service),
     audit: AuditLogService | None = Depends(get_audit_log_service),
-) -> WorkflowRunOut:
-    """Run the workflow inline (returns trace). For prod, dispatch via Celery."""
+) -> dict:
+    """Trigger a workflow run.
+
+    ``mode`` selects the path:
+      * ``auto`` (default) — durable when the jobs backend is Postgres,
+        inline when it's the in-memory dev backend. Recommended for
+        all clients; the response shape is the same in both cases.
+      * ``durable``         — force the Postgres-backed jobs path. 429s
+        when the tenant rate-limit bucket is empty.
+      * ``inline``          — force the legacy synchronous path. Useful
+        for tests and for ad-hoc debugging where you want the trace
+        to come back in the response body.
+
+    Response shape:
+      ``{"mode": "durable"|"inline", "run_id": str|null, "job_id": str|null,
+        "status": str, "trace": [...]?}``
+
+    For durable mode, ``run_id`` is null until a worker picks up
+    ``run.start`` and creates the run row; clients should poll
+    ``GET /jobs/{job_id}`` then ``GET /workflows/{wf}/runs/{run_id}``."""
+    from app.api.deps import (
+        get_job_queue, get_settings, get_tenant_rate_limiter,
+    )
+
+    settings = get_settings()
+    backend_supports_durable = (
+        settings.resolved_persistence_backend() == "supabase"
+    )
+
+    # Decide path.
+    chosen = mode.lower()
+    if chosen == "auto":
+        chosen = "durable" if backend_supports_durable else "inline"
+    if chosen == "durable" and not backend_supports_durable:
+        # Caller forced durable on memory backend — refuse rather than
+        # silently fall back, so they fix their config.
+        raise HTTPException(
+            status_code=503,
+            detail="durable mode requires the Postgres backend; "
+                   "switch PERSISTENCE_BACKEND or call with mode=inline",
+        )
+
+    if chosen == "durable":
+        queue = get_job_queue()
+        limiter = get_tenant_rate_limiter()
+        if not await limiter.try_consume(user.org_id, cost=1.0):
+            raise HTTPException(
+                status_code=429,
+                detail="tenant rate limit exceeded — try again in a few seconds",
+            )
+        try:
+            job = await queue.enqueue(
+                "run.start", user.org_id,
+                {"workflow_id": str(workflow_id),
+                 "trigger_kind": "manual"},
+                idempotency_key=f"start:{workflow_id}:{user.id}",
+            )
+        except Exception as exc:                                     # noqa: BLE001
+            raise HTTPException(status_code=500,
+                                 detail=str(exc)) from exc
+        if audit is not None:
+            await audit.record(
+                org_id=user.org_id, action="workflow.run.enqueued",
+                resource_type="workflow", resource_id=workflow_id,
+                after={"job_id": job.id, "mode": "durable"},
+            )
+        return {
+            "mode": "durable",
+            "run_id": None, "job_id": job.id,
+            "status": job.status.value,
+            "scheduled_for": job.scheduled_for.isoformat(),
+        }
+
+    # Inline path — preserved for tests + memory mode.
     run = await svc.run(OrgId(UUID(user.org_id)), WorkflowId(workflow_id))
     if audit is not None:
         await audit.record(
-            org_id=user.org_id,
-            action="workflow.run",
-            resource_type="workflow",
-            resource_id=workflow_id,
-            after={
-                "run_id": str(run.id),
-                "status": run.status.value,
-                "initiator": run.initiator,
-            },
+            org_id=user.org_id, action="workflow.run",
+            resource_type="workflow", resource_id=workflow_id,
+            after={"run_id": str(run.id), "status": run.status.value,
+                    "mode": "inline", "initiator": run.initiator},
         )
-    return WorkflowRunOut(
-        id=run.id, workflow_id=run.workflow_id, status=run.status.value,
-        revision_count=run.revision_count, started_at=run.started_at,
-        finished_at=run.finished_at, error=run.error,
-        trace=[{"agent": e.agent, "event": e.event, "ts": e.occurred_at.isoformat(),
-                **e.payload} for e in run.trace],
-    )
+    return {
+        "mode": "inline",
+        "run_id": str(run.id), "job_id": None,
+        "status": run.status.value,
+        "revision_count": run.revision_count,
+        "started_at": run.started_at.isoformat() if run.started_at else None,
+        "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+        "error": run.error,
+        "trace": [
+            {"agent": e.agent, "event": e.event,
+             "ts": e.occurred_at.isoformat(), **e.payload}
+            for e in run.trace
+        ],
+    }
 
 
 def _to_out(wf) -> WorkflowOut:

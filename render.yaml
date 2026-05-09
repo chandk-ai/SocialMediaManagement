@@ -106,6 +106,54 @@ services:
       - key: QUEUE_RESULT_BACKEND
         fromService: { type: redis, name: smms-redis, property: connectionString }
 
+  # ── Durable jobs worker (Pillar 1)
+  # Drains smms.jobs (run.start → run.publish, engagement.fetch, system jobs).
+  # Independent from the Celery worker above — Celery handles legacy publish
+  # DLQ; this one runs the Postgres-backed durable engine.
+  - type: worker
+    name: smms-jobs-worker
+    runtime: docker
+    rootDir: backend
+    plan: starter
+    dockerCommand: python -m app.services.jobs.worker
+    envVars:
+      - key: ENV
+        value: prod
+      - key: PERSISTENCE_BACKEND
+        value: supabase
+      - key: OBS_LOG_JSON
+        value: "true"
+      - key: SMMS_WORKERS_CONCURRENCY
+        value: "4"
+      - key: SMMS_WORKERS_HTTP_PORT
+        value: "8080"
+      - key: OTEL_SERVICE_NAME
+        value: smms-jobs-worker
+      - key: SEC_TOKEN_VAULT_MASTER_KEY
+        fromService: { type: web, name: smms-api, envVarKey: SEC_TOKEN_VAULT_MASTER_KEY }
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      - key: SUPABASE_POSTGRES_CONNECTION_STRING
+        sync: false
+      - key: LLM_ANTHROPIC_API_KEY
+        sync: false
+      - key: LLM_DEFAULT_PROVIDER
+        value: anthropic
+      - key: SENTRY_DSN
+        sync: false
+      - key: SENTRY_TRACES_SAMPLE_RATE
+        value: "0.1"
+      - key: SMMS_ALERTS_SLACK_URL
+        sync: false
+      # Same Redis the API uses — keeps cache + per-org rate-limit state
+      # consistent across processes.
+      - key: REDIS_URL
+        fromService: { type: redis, name: smms-redis, property: connectionString }
+
   # ── Celery Beat (drives scheduled workflows + nightly metrics + engagement poll)
   - type: worker
     name: smms-beat

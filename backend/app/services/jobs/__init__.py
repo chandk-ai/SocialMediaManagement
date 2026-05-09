@@ -30,6 +30,7 @@ from app.services.jobs.handlers import REGISTRY, register_handler
 # Importing the handler modules registers them via decorator side effects.
 from app.services.jobs import handlers_workflow  # noqa: F401
 from app.services.jobs import handlers_engagement  # noqa: F401
+from app.services.jobs import handlers_system  # noqa: F401
 
 __all__ = [
     "JobQueue", "JobRecord", "JobStatus", "JobNotFound",
