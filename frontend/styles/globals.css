@@ -86,31 +86,106 @@ body {
            disabled:bg-ink-50 disabled:cursor-not-allowed;
   }
 
-  /* Buttons — base. Variants compose on top. */
+  /* ─── Buttons ────────────────────────────────────────────────────
+     Three pillars of "looks crafted":
+       1. Inner top highlight — a 1px hairline of slightly-lighter
+          colour at the very top, applied via box-shadow inset. Reads
+          as a "lit edge", the way real physical buttons catch light.
+          The trick Linear/Stripe/Vercel all use.
+       2. Tactile press — translate-y + scale(0.985) on :active. The
+          movement is sub-pixel-perceptible but registers as a real
+          interaction, not a colour blink.
+       3. Disabled = greyed, not transparent. opacity-50 makes a
+          button look broken; a calm neutral fill makes it look
+          deliberately inactive. */
   .btn {
     @apply inline-flex items-center justify-center gap-2 rounded-lg
-           px-3.5 py-2 text-sm font-medium
-           transition-all duration-150 ease-out-quart
-           disabled:opacity-50 disabled:cursor-not-allowed
+           px-3.5 py-2 text-sm font-medium leading-none
+           select-none whitespace-nowrap
+           transition-[transform,box-shadow,background-color,color,border-color]
+           duration-150 ease-out-quart
+           active:translate-y-px
            focus-visible:outline-none focus-visible:shadow-ring-accent;
   }
-  /* Primary uses the accent gradient — gives the most-used CTA a
-     touch of depth without resorting to drop shadows. */
+  /* Disabled handling — neutralise to a calm grey, never just dim
+     the active style. Applies to both real :disabled and the
+     [aria-disabled] form for non-native triggers (anchor tags etc). */
+  .btn:disabled, .btn[aria-disabled="true"] {
+    @apply cursor-not-allowed opacity-100
+           bg-ink-100 text-ink-400 border-ink-200
+           shadow-none;
+    background-image: none;
+    transform: none;
+  }
+  /* Loading — set ``data-loading`` on the button. The icon hides; a
+     spinner takes its place. Pointer events disabled so the button
+     can't fire twice mid-request. The spinner uses the same conic-
+     gradient ring as <Spinner variant="ring"> so the visual language
+     stays consistent across the app. */
+  .btn[data-loading="true"] {
+    @apply pointer-events-none relative;
+  }
+  .btn[data-loading="true"] > :not(.btn-spinner) {
+    @apply opacity-0;
+  }
+  .btn-spinner {
+    @apply absolute inline-block size-4 animate-spin-smms;
+    border-radius: 50%;
+    background: conic-gradient(from 0deg, currentColor 0deg, transparent 270deg, currentColor 360deg);
+    -webkit-mask: radial-gradient(circle, transparent calc(50% - 2px), #000 calc(50% - 2px));
+    mask: radial-gradient(circle, transparent calc(50% - 2px), #000 calc(50% - 2px));
+  }
+
+  /* Primary — accent gradient, lit inner top edge, press lifts +
+     deepens. The gradient subtly shifts on hover (soft→default
+     becomes default→strong) so the button feels alive rather than
+     reading as a flat colour swap. */
   .btn-primary {
-    @apply btn text-accent-fg shadow-card-sm
+    @apply btn text-accent-fg
            bg-[image:linear-gradient(180deg,theme(colors.accent.soft),theme(colors.accent.DEFAULT))]
            hover:bg-[image:linear-gradient(180deg,theme(colors.accent.DEFAULT),theme(colors.accent.strong))]
-           active:bg-[image:linear-gradient(180deg,theme(colors.accent.strong),theme(colors.accent.strong))];
+           active:bg-[image:linear-gradient(180deg,theme(colors.accent.strong),theme(colors.accent.strong))]
+           shadow-[0_1px_2px_rgba(15,20,40,0.08),inset_0_1px_0_rgba(255,255,255,0.18)]
+           hover:shadow-[0_2px_4px_rgba(15,20,40,0.12),inset_0_1px_0_rgba(255,255,255,0.22)];
   }
-  .btn-ghost   { @apply btn text-ink-700 hover:bg-ink-100; }
+
+  /* Outline — crisper, with subtle resting shadow that responds to
+     hover. Border + bg ramp together so the hover state reads as a
+     single, intentional shift. */
   .btn-outline {
-    @apply btn border border-ink-200 bg-white text-ink-800
-           hover:bg-ink-50 hover:border-ink-300;
+    @apply btn bg-white text-ink-800
+           border border-ink-200 shadow-card-sm
+           hover:bg-ink-50 hover:border-ink-300 hover:shadow-card
+           active:bg-ink-100;
   }
-  /* Size modifiers — compose with any btn-* variant.
-     ``btn-xs`` is the same height as inline icon-only buttons. */
-  .btn-xs { @apply px-2 py-1 text-xs gap-1 rounded-md; }
-  .btn-sm { @apply px-3 py-1.5 text-xs gap-1.5; }
+
+  /* Ghost — no chrome at rest, fills on hover. Used for low-priority
+     actions sitting next to a primary (Cancel-next-to-Save). */
+  .btn-ghost {
+    @apply btn text-ink-700
+           hover:bg-ink-100 hover:text-ink-900
+           active:bg-ink-200;
+  }
+
+  /* Danger — destructive actions (Delete account, Cancel job, Revoke
+     access). Same depth pattern as primary, in a red colorway so the
+     visual weight registers as "stop and think". */
+  .btn-danger {
+    @apply btn text-white
+           bg-[image:linear-gradient(180deg,#ef4444,#dc2626)]
+           hover:bg-[image:linear-gradient(180deg,#dc2626,#b91c1c)]
+           active:bg-[image:linear-gradient(180deg,#b91c1c,#b91c1c)]
+           shadow-[0_1px_2px_rgba(15,20,40,0.08),inset_0_1px_0_rgba(255,255,255,0.18)]
+           hover:shadow-[0_2px_4px_rgba(220,38,38,0.18),inset_0_1px_0_rgba(255,255,255,0.22)];
+  }
+
+  /* Size modifiers — compose with any btn-* variant. Padding +
+     gap + radius all shift together so the proportions stay right. */
+  .btn-xs { @apply px-2   py-1    text-xs   gap-1   rounded-md; }
+  .btn-sm { @apply px-3   py-1.5  text-xs   gap-1.5; }
+  .btn-lg { @apply px-5   py-2.5  text-sm   gap-2.5 rounded-xl; }
+  /* Icon-only — use with btn-xs / btn-sm + aria-label for accessibility. */
+  .btn-icon { @apply px-0 aspect-square justify-center; }
 
   /* Badge — neutral pill, callers tint via tone classes. */
   .badge {
@@ -137,4 +212,38 @@ body {
     @apply bg-white/85 backdrop-blur
            supports-[backdrop-filter]:bg-white/65;
   }
+}
+
+
+/* ─── Loading animations ─────────────────────────────────────────────
+   Custom keyframes for the Spinner component family. Live outside
+   any @layer so they're always emitted regardless of @apply scope.
+   Naming prefixed with ``smms-`` to avoid colliding with Tailwind's
+   built-in ``animate-spin`` / ``animate-pulse``. */
+@keyframes smms-spin {
+  to { transform: rotate(360deg); }
+}
+@keyframes smms-dot-pulse {
+  0%, 100% { opacity: 0.25; transform: scale(0.85); }
+  40%      { opacity: 1;    transform: scale(1.05); }
+}
+@keyframes smms-bar-wave {
+  0%, 100% { transform: scaleY(0.35); }
+  40%      { transform: scaleY(1); }
+}
+
+.animate-spin-smms { animation: smms-spin 0.85s linear infinite; }
+.animate-smms-dot  { animation: smms-dot-pulse 1.2s ease-in-out infinite; }
+.animate-smms-bar  {
+  transform-origin: bottom;
+  animation: smms-bar-wave 1.0s ease-in-out infinite;
+}
+
+/* Reduced-motion — slow rotations / pulses to a vestibular-safe
+   speed but don't stop them outright. A frozen spinner reads as
+   "the app crashed". */
+@media (prefers-reduced-motion: reduce) {
+  .animate-spin-smms { animation-duration: 2.4s; }
+  .animate-smms-dot  { animation-duration: 2.4s; }
+  .animate-smms-bar  { animation-duration: 2.4s; }
 }
