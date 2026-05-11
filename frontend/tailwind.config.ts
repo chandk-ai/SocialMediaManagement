@@ -48,18 +48,23 @@ const config: Config = {
         // hover states + selected pills; ``strong`` for pressed /
         // active. ``muted`` is the lightest tint, for full-section
         // tinted backgrounds.
+        //
+        // Wellness-green emerald palette: positive-action energy
+        // (#22c55e is the "go" green) without leaving the saturated,
+        // confident range that B2B tools live in. Pairs cleanly with
+        // the cool-leaning ink scale — same combo Notion + Linear use.
         accent: {
-          DEFAULT: '#3a6df0',
+          DEFAULT: '#16a34a',   // emerald-600 — primary
           fg:      '#ffffff',
-          soft:    '#5b8def',
-          strong:  '#2d52ce',
-          muted:   '#eaf0ff',
+          soft:    '#22c55e',   // emerald-500 — hover ramp + gradient top
+          strong:  '#15803d',   // emerald-700 — pressed / gradient bottom
+          muted:   '#ecfdf5',   // emerald-50  — tinted surfaces
         },
         // brand — the surface gradient used by the Logo SVG so the
         // values stay in sync with the rest of the system.
         brand: {
-          from: '#5B8DEF',
-          to:   '#2D52CE',
+          from: '#22C55E',
+          to:   '#15803D',
         },
       },
       fontFamily: {
@@ -84,7 +89,7 @@ const config: Config = {
         'card':    '0 1px 2px rgba(15, 20, 40, 0.05), 0 4px 12px rgba(15, 20, 40, 0.04)',
         'card-lg': '0 4px 8px rgba(15, 20, 40, 0.06), 0 24px 48px rgba(15, 20, 40, 0.08)',
         'inner-sm': 'inset 0 1px 0 rgba(255, 255, 255, 0.06)',
-        'ring-accent': '0 0 0 3px rgba(58, 109, 240, 0.18)',
+        'ring-accent': '0 0 0 3px rgba(22, 163, 74, 0.20)',
       },
       borderRadius: {
         lg:   '0.625rem',
@@ -95,8 +100,11 @@ const config: Config = {
         // Subtle page-background grain so the white cards have
         // something to push off — keeps the canvas from feeling
         // flat without becoming busy.
-        'page-grad': 'radial-gradient(1200px 800px at 100% 0%, rgba(58,109,240,0.05), transparent 60%), radial-gradient(900px 700px at 0% 100%, rgba(91,141,239,0.04), transparent 50%)',
-        'accent-grad': 'linear-gradient(135deg, #5B8DEF 0%, #2D52CE 100%)',
+        // Soft emerald wash on the page canvas — gentle enough to read
+        // as ambient light rather than a coloured background. Two
+        // off-axis radial stops avoid the "tinted glass" look.
+        'page-grad': 'radial-gradient(1200px 800px at 100% 0%, rgba(22,163,74,0.045), transparent 60%), radial-gradient(900px 700px at 0% 100%, rgba(34,197,94,0.035), transparent 50%)',
+        'accent-grad': 'linear-gradient(135deg, #22C55E 0%, #15803D 100%)',
       },
       transitionTimingFunction: {
         'out-quart': 'cubic-bezier(0.25, 1, 0.5, 1)',
