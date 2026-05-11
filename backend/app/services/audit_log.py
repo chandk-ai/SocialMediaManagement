@@ -15,10 +15,13 @@ Examples: ``llm_key.set``, ``platform.connect``, ``workflow.activate``,
 """
 from __future__ import annotations
 
+import base64
 import json
 from datetime import datetime
 from typing import Any
 from uuid import UUID
+
+from sqlalchemy.exc import SQLAlchemyError
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -149,6 +152,193 @@ class AuditLogService:
             "breaks": bad[:25],
         }
 
+    async def list_paged(
+        self,
+        org_id: OrgId | str,
+        *,
+        limit: int = 50,
+        cursor: str | None = None,
+        actor_id: str | UUID | None = None,
+        action: str | None = None,
+        resource_type: str | None = None,
+        resource_id: str | UUID | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Cursor-paged audit log read.
+
+        Append-only logs are the textbook keyset-pagination case:
+        offset pagination would skip / duplicate rows whenever a new
+        audit row landed mid-walk. The cursor encodes ``(occurred_at,
+        id)`` of the LAST row returned; the next call asks for rows
+        strictly older than that tuple, breaking ties on ``id`` so the
+        order is total.
+
+        The cursor format is opaque to the client: base64(json) so we
+        can extend it later without bumping the API. If a stale cursor
+        comes in (data deleted, format mismatch) we treat it as a fresh
+        scan rather than 400ing — it's a read API, the worst case is
+        the user sees the most-recent page again.
+
+        Filters:
+          actor_id      uuid — only events emitted by this user
+          action        substring match (ILIKE %x%), case-insensitive
+          resource_type exact match
+          resource_id   uuid — narrows to one entity's history
+          since/until   half-open [since, until) on occurred_at
+        Cap: ``limit`` clamped to [1, 100]. The page count keeps the
+        wire payload modest even when ``before`` / ``after`` JSON blobs
+        are large.
+
+        Returns:
+          {
+            "events":         [...],
+            "next_cursor":    str | None,   # null when no more rows
+            "has_more":       bool,
+            "total_fetched":  int,
+          }
+        """
+        limit = max(1, min(int(limit), 100))
+        # We fetch limit+1 to cheaply detect "is there more after this
+        # page" without a separate COUNT round-trip.
+        fetch_n = limit + 1
+
+        clauses = ["org_id = :org_id"]
+        params: dict[str, Any] = {
+            "org_id": UUID(str(org_id)), "limit": fetch_n,
+        }
+
+        if cursor:
+            decoded = _decode_cursor(cursor)
+            if decoded is not None:
+                # Keyset predicate: strict less-than on the tuple so the
+                # same row never appears on two consecutive pages.
+                clauses.append(
+                    "(occurred_at, id) < (:cur_ts, :cur_id)"
+                )
+                params["cur_ts"] = decoded["ts"]
+                params["cur_id"] = decoded["id"]
+
+        if actor_id:
+            try:
+                params["aid"] = UUID(str(actor_id))
+                clauses.append("actor_id = :aid")
+            except ValueError:
+                # Bad UUID — ignore filter rather than 400; the UI sends
+                # filters from a typeahead that can momentarily be junk.
+                pass
+        if action:
+            # Case-insensitive substring — easier for operators who
+            # remember "publish" but not whether it was post.publish or
+            # workflow.publish.
+            clauses.append("action ILIKE :action")
+            params["action"] = f"%{action.strip()}%"
+        if resource_type:
+            clauses.append("resource_type = :rtype")
+            params["rtype"] = resource_type
+        if resource_id:
+            try:
+                params["rid"] = UUID(str(resource_id))
+                clauses.append("resource_id = :rid")
+            except ValueError:
+                pass
+        if since is not None:
+            clauses.append("occurred_at >= :since")
+            params["since"] = since
+        if until is not None:
+            clauses.append("occurred_at <  :until")
+            params["until"] = until
+
+        sql = (
+            "SELECT id, org_id, actor_type, actor_id, action, "
+            "       resource_type, resource_id, before, after, "
+            "       request_id, occurred_at "
+            "FROM smms.audit_log "
+            f"WHERE {' AND '.join(clauses)} "
+            "ORDER BY occurred_at DESC, id DESC "
+            "LIMIT :limit"
+        )
+
+        async with self._sm() as s:
+            try:
+                result = await s.execute(text(sql), params)
+                rows = result.fetchall()
+            except SQLAlchemyError as exc:
+                log.warning("audit_list_paged_failed", error=str(exc))
+                return {
+                    "events": [], "next_cursor": None,
+                    "has_more": False, "total_fetched": 0,
+                }
+
+        has_more = len(rows) > limit
+        page_rows = rows[:limit]
+        next_cursor: str | None = None
+        if has_more and page_rows:
+            last = page_rows[-1]
+            next_cursor = _encode_cursor(last.occurred_at, last.id)
+
+        events: list[dict[str, Any]] = []
+        for r in page_rows:
+            before = r.before if isinstance(r.before, dict) else (
+                json.loads(r.before) if r.before else None
+            )
+            after = r.after if isinstance(r.after, dict) else (
+                json.loads(r.after) if r.after else None
+            )
+            events.append({
+                "id": str(r.id),
+                "occurred_at": r.occurred_at.isoformat() if r.occurred_at else "",
+                "actor_type": r.actor_type,
+                "actor_id": str(r.actor_id) if r.actor_id else None,
+                "action": r.action,
+                "resource_type": r.resource_type,
+                "resource_id": str(r.resource_id) if r.resource_id else None,
+                "before": before,
+                "after": after,
+                "request_id": r.request_id,
+            })
+
+        return {
+            "events": events,
+            "next_cursor": next_cursor,
+            "has_more": has_more,
+            "total_fetched": len(events),
+        }
+
+    async def distinct_filter_values(
+        self, org_id: OrgId | str, *, since: datetime | None = None,
+    ) -> dict[str, list[str]]:
+        """Populate the filter dropdowns. Returns the distinct
+        ``action`` + ``resource_type`` + ``actor_id`` values an org has
+        produced in the recent window — small N, cheap query."""
+        params: dict[str, Any] = {"org_id": UUID(str(org_id))}
+        since_clause = ""
+        if since is not None:
+            since_clause = " AND occurred_at >= :since"
+            params["since"] = since
+        async with self._sm() as s:
+            actions = (await s.execute(text(
+                f"SELECT DISTINCT action FROM smms.audit_log "
+                f"WHERE org_id=:org_id{since_clause} "
+                f"ORDER BY action LIMIT 200"
+            ), params)).fetchall()
+            rtypes = (await s.execute(text(
+                f"SELECT DISTINCT resource_type FROM smms.audit_log "
+                f"WHERE org_id=:org_id{since_clause} "
+                f"ORDER BY resource_type LIMIT 200"
+            ), params)).fetchall()
+            actors = (await s.execute(text(
+                f"SELECT DISTINCT actor_id FROM smms.audit_log "
+                f"WHERE org_id=:org_id{since_clause} "
+                f"AND actor_id IS NOT NULL "
+                f"ORDER BY actor_id LIMIT 200"
+            ), params)).fetchall()
+        return {
+            "actions":         [r[0] for r in actions if r[0]],
+            "resource_types":  [r[0] for r in rtypes if r[0]],
+            "actor_ids":       [str(r[0]) for r in actors if r[0]],
+        }
+
     async def list_recent(
         self,
         org_id: OrgId | str,
@@ -196,3 +386,38 @@ class AuditLogService:
                 "request_id": r.request_id,
             })
         return out
+
+
+# ── cursor helpers ─────────────────────────────────────────────────────
+def _encode_cursor(ts: datetime, row_id: UUID | str) -> str:
+    """Opaque cursor = base64 of ``{"ts": iso8601, "id": uuid_str}``.
+
+    Opaque so clients can't fabricate cursors that probe other orgs
+    (the SQL still scopes by org_id, but principle-of-least-surprise:
+    don't let cursors leak schema)."""
+    payload = json.dumps({
+        "ts": ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
+        "id": str(row_id),
+    }, separators=(",", ":"))
+    return base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def _decode_cursor(cursor: str) -> dict | None:
+    """Best-effort decode. Returns ``None`` for any garbled cursor —
+    callers treat it as a fresh scan rather than 400-ing the request,
+    because audit log reads are idempotent and the user is debugging."""
+    try:
+        # Re-pad — we stripped trailing '=' in encode.
+        padded = cursor + "=" * (-len(cursor) % 4)
+        raw = base64.urlsafe_b64decode(padded.encode("ascii"))
+        data = json.loads(raw)
+        ts_raw = data.get("ts")
+        id_raw = data.get("id")
+        if not ts_raw or not id_raw:
+            return None
+        return {
+            "ts": datetime.fromisoformat(ts_raw),
+            "id": UUID(id_raw),
+        }
+    except Exception:                                                # noqa: BLE001
+        return None

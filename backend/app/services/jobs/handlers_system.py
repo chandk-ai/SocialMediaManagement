@@ -89,7 +89,11 @@ async def knowledge_auto_ingest(ctx: HandlerContext) -> dict[str, Any]:
                        WITHIN GROUP (ORDER BY score) AS threshold
                 FROM metrics
             )
-            SELECT m.post_id::text, m.score, p.text, p.title, p.created_at
+            -- smms.posts schema (001_init.sql) has no ``title`` column —
+            -- the entity is ``Post.text`` only. We synthesize a KB
+            -- document title from the post's first line (or the first
+            -- 80 chars) so the corpus list remains readable.
+            SELECT m.post_id::text, m.score, p.text, p.created_at
               FROM metrics m
               JOIN smms.posts p ON p.id = m.post_id
              WHERE m.score >= (SELECT threshold FROM cutoff)
@@ -113,13 +117,21 @@ async def knowledge_auto_ingest(ctx: HandlerContext) -> dict[str, Any]:
 
     ingested = 0
     for row in candidates:
-        post_id, score, text_body, title, created_at = row
+        post_id, score, text_body, created_at = row
         content = (text_body or "").strip()
         if len(content) < 100:
             continue                                                 # too short to matter
+        # Synthesize a title: first non-blank line, truncated. Falls
+        # back to a generic placeholder if the post is just whitespace
+        # (shouldn't happen given the len >= 100 check, but be safe).
+        first_line = next(
+            (ln.strip() for ln in content.splitlines() if ln.strip()),
+            "",
+        )
+        synthetic_title = (first_line[:80] or "High-engagement post")
         try:
             await store.add_document(
-                org_id=org_id, title=(title or "Untitled post")[:200],
+                org_id=org_id, title=synthetic_title,
                 content=content, source_kind="past_post",
                 source_ref=str(post_id),
                 metadata={

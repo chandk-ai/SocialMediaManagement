@@ -81,22 +81,24 @@ services:
         value: supabase
       - key: OBS_LOG_JSON
         value: "true"
+      # Secrets inherited from smms-api (single source of truth — see
+      # the durable-jobs-worker block below for the rationale).
       - key: SEC_TOKEN_VAULT_MASTER_KEY
         fromService: { type: web, name: smms-api, envVarKey: SEC_TOKEN_VAULT_MASTER_KEY }
       - key: SUPABASE_URL
-        sync: false
+        fromService: { type: web, name: smms-api, envVarKey: SUPABASE_URL }
       - key: SUPABASE_SERVICE_ROLE_KEY
-        sync: false
+        fromService: { type: web, name: smms-api, envVarKey: SUPABASE_SERVICE_ROLE_KEY }
       - key: SUPABASE_JWT_SECRET
-        sync: false
+        fromService: { type: web, name: smms-api, envVarKey: SUPABASE_JWT_SECRET }
       - key: SUPABASE_POSTGRES_CONNECTION_STRING
-        sync: false
+        fromService: { type: web, name: smms-api, envVarKey: SUPABASE_POSTGRES_CONNECTION_STRING }
       - key: LLM_ANTHROPIC_API_KEY
-        sync: false
+        fromService: { type: web, name: smms-api, envVarKey: LLM_ANTHROPIC_API_KEY }
       - key: LLM_DEFAULT_PROVIDER
         value: anthropic
       - key: SENTRY_DSN
-        sync: false
+        fromService: { type: web, name: smms-api, envVarKey: SENTRY_DSN }
       - key: SENTRY_TRACES_SAMPLE_RATE
         value: "0.1"
       - key: REDIS_URL
@@ -129,24 +131,35 @@ services:
         value: "8080"
       - key: OTEL_SERVICE_NAME
         value: smms-jobs-worker
+      # ─── Secrets inherited from smms-api ──────────────────────────
+      # Single source of truth: the API service is where you paste these
+      # values when applying the Blueprint. Every other compute pulls
+      # them via ``fromService`` so a new worker (or a re-sync of an
+      # existing one) NEVER boots with empty secrets — which was the
+      # exact failure mode that produced the May 2026 DNS lookup
+      # warnings ([Errno -2] Name or service not known on every claim).
       - key: SEC_TOKEN_VAULT_MASTER_KEY
         fromService: { type: web, name: smms-api, envVarKey: SEC_TOKEN_VAULT_MASTER_KEY }
       - key: SUPABASE_URL
-        sync: false
+        fromService: { type: web, name: smms-api, envVarKey: SUPABASE_URL }
       - key: SUPABASE_SERVICE_ROLE_KEY
-        sync: false
+        fromService: { type: web, name: smms-api, envVarKey: SUPABASE_SERVICE_ROLE_KEY }
       - key: SUPABASE_JWT_SECRET
-        sync: false
+        fromService: { type: web, name: smms-api, envVarKey: SUPABASE_JWT_SECRET }
       - key: SUPABASE_POSTGRES_CONNECTION_STRING
-        sync: false
+        fromService: { type: web, name: smms-api, envVarKey: SUPABASE_POSTGRES_CONNECTION_STRING }
       - key: LLM_ANTHROPIC_API_KEY
-        sync: false
+        fromService: { type: web, name: smms-api, envVarKey: LLM_ANTHROPIC_API_KEY }
       - key: LLM_DEFAULT_PROVIDER
         value: anthropic
       - key: SENTRY_DSN
-        sync: false
+        fromService: { type: web, name: smms-api, envVarKey: SENTRY_DSN }
       - key: SENTRY_TRACES_SAMPLE_RATE
         value: "0.1"
+      # Slack alerts — independent of the API since you may want
+      # different paging routes for worker-only conditions (DLQ flood,
+      # orphan sweeps). Keep as sync:false so a missing value just
+      # silences alerts rather than breaking the worker.
       - key: SMMS_ALERTS_SLACK_URL
         sync: false
       # Same Redis the API uses — keeps cache + per-org rate-limit state
@@ -168,18 +181,19 @@ services:
         value: supabase
       - key: OBS_LOG_JSON
         value: "true"
+      # Secrets inherited from smms-api (single source of truth).
       - key: SEC_TOKEN_VAULT_MASTER_KEY
         fromService: { type: web, name: smms-api, envVarKey: SEC_TOKEN_VAULT_MASTER_KEY }
       - key: SUPABASE_URL
-        sync: false
+        fromService: { type: web, name: smms-api, envVarKey: SUPABASE_URL }
       - key: SUPABASE_SERVICE_ROLE_KEY
-        sync: false
+        fromService: { type: web, name: smms-api, envVarKey: SUPABASE_SERVICE_ROLE_KEY }
       - key: SUPABASE_JWT_SECRET
-        sync: false
+        fromService: { type: web, name: smms-api, envVarKey: SUPABASE_JWT_SECRET }
       - key: SUPABASE_POSTGRES_CONNECTION_STRING
-        sync: false
+        fromService: { type: web, name: smms-api, envVarKey: SUPABASE_POSTGRES_CONNECTION_STRING }
       - key: SENTRY_DSN
-        sync: false
+        fromService: { type: web, name: smms-api, envVarKey: SENTRY_DSN }
       - key: SENTRY_TRACES_SAMPLE_RATE
         value: "0.1"
       - key: REDIS_URL
