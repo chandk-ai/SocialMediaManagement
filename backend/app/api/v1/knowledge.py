@@ -145,14 +145,19 @@ async def _build_embed_fn(org_id: str, wf_service):
     save documents without embeddings (still listable, not searchable
     until re-embedded later)."""
     try:
-        from app.api.deps import get_registry
+        from app.api.deps import _build_repos, get_registry
         from app.agents.factory import build_orchestrator
+        from app.domain.value_objects.ids import OrgId
+        from uuid import UUID
         # Pick any workflow's config as a template — in practice any
         # workflow in the org should have the same provider configured;
         # otherwise we fall back to the first one we find.
-        from app.api.deps import _build_repos
         repos = _build_repos()
-        wfs = await repos["workflow"].list_for_org(org_id, limit=1)
+        org_typed = OrgId(UUID(org_id) if isinstance(org_id, str) else org_id)
+        # WorkflowRepository.list(org_id) -> list[Workflow]. No limit
+        # kwarg; KB ingestion is rare enough that loading all workflow
+        # rows is fine.
+        wfs = await repos["workflow"].list(org_typed)
         if not wfs:
             return None
         wf = wfs[0]
