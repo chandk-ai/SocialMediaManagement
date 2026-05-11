@@ -21,13 +21,13 @@
  * a single read of /audit-logs/verify that confirms nobody has
  * tampered with the rows directly in the database (SOC2 hook).
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { AppShell } from '@/components/layout/AppShell';
 import { Card, CardTitle, CardDescription } from '@/components/ui/Card';
 import { Badge } from '@/components/ui/Badge';
 import { Input } from '@/components/ui/Input';
-import { Spinner, InlineLoader } from '@/components/ui/Spinner';
+import { Spinner, InlineLoader, PageLoader } from '@/components/ui/Spinner';
 import { api, useApi, ApiError } from '@/lib/api/client';
 import { formatDateTime } from '@/lib/utils';
 import {
@@ -87,7 +87,25 @@ const PRESETS: Array<{ label: string; days: number | null }> = [
 
 
 // ─────────────────────────────────────────────────────────────────────
+// Page default — a thin Suspense wrapper. Next.js 14 requires
+// useSearchParams() (and any other hooks that bail out static
+// prerender) to sit inside a Suspense boundary, otherwise the build
+// fails with "should be wrapped in a suspense boundary at page /audit".
+// The real component lives in AuditPageImpl below.
 export default function AuditPage() {
+  return (
+    <Suspense fallback={
+      <AppShell>
+        <PageLoader label="Loading audit log…" />
+      </AppShell>
+    }>
+      <AuditPageImpl />
+    </Suspense>
+  );
+}
+
+
+function AuditPageImpl() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
