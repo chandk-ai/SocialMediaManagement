@@ -586,17 +586,30 @@ class DurableWorkflowRunner:
 
         if decision is AgentDecision.ESCALATE:
             run.transition(RunStatus.AWAITING_REVIEW)
-            return PhaseResult(extras={"requires_review": True})
+            review_ids = await self._materialize_drafts_as_review(
+                run, wf, drafts, state.evaluations,
+                reason="critique_escalated",
+            )
+            return PhaseResult(extras={"requires_review": True,
+                                       "review_post_ids": review_ids})
 
         if decision is AgentDecision.REVISE:
             count = int(run.metadata.get("rerun_count", 0)) + 1
             run.metadata["rerun_count"] = count
             max_revisions = int(getattr(wf.config, "max_revisions", 3) or 3)
             if count > max_revisions:
-                run.transition(RunStatus.FAILED)
+                run.transition(RunStatus.AWAITING_REVIEW)
                 run.error = f"exhausted {max_revisions} revisions"
+                # Don't lose the work — surface the best draft for a
+                # human to approve / edit. The run lands in AWAITING_REVIEW
+                # rather than FAILED so the Reviews + Posts pages light up.
+                review_ids = await self._materialize_drafts_as_review(
+                    run, wf, drafts, state.evaluations,
+                    reason="rerun_exhausted",
+                )
                 return PhaseResult(done=True,
-                                    extras={"reason": "rerun_exhausted"})
+                                    extras={"reason": "rerun_exhausted",
+                                            "review_post_ids": review_ids})
             # Re-execute with the critique notes — Plan stays the same,
             # only Executor reruns.
             return PhaseResult(next_phase="execute",
@@ -619,8 +632,13 @@ class DurableWorkflowRunner:
                 agent="critique", event="awaiting_human_approval",
                 payload={"reason": "workflow.config.require_human_approval"},
             ))
+            review_ids = await self._materialize_drafts_as_review(
+                run, wf, drafts, state.evaluations,
+                reason="require_human_approval",
+            )
             return PhaseResult(extras={"requires_review": True,
-                                       "auto_approved": True})
+                                       "auto_approved": True,
+                                       "review_post_ids": review_ids})
         return PhaseResult(next_phase="publish")
 
     # ── phase: publish ─────────────────────────────────────────────
@@ -746,6 +764,81 @@ class DurableWorkflowRunner:
                 log.warning("durable_platform_lookup_failed",
                             platform_id=str(pid), error=str(exc))
         return names or [str(p) for p in wf.platform_ids]
+
+    async def _materialize_drafts_as_review(
+        self, run: WorkflowRun, wf,
+        drafts: list[DraftPost],
+        evaluations: list | None = None,
+        *, reason: str,
+    ) -> list[str]:
+        """Persist each draft as a Post(status=REVIEW) so it shows up in
+        the Posts page and Reviews queue when the run stops short of
+        autopublish (escalated by critique, blocked by
+        require_human_approval, or revisions exhausted).
+
+        Without this, drafts only live in ``run.metadata['drafts']`` and
+        the user sees an empty Posts page after green-looking job runs.
+
+        Returns the list of newly created post_ids (string form). The
+        IDs are also appended to ``run.metadata['review_post_ids']`` so
+        a partial-retry of this phase doesn't double-create.
+        """
+        if not drafts:
+            return []
+        already = set(run.metadata.get("review_post_ids") or [])
+        platforms = await self._load_platforms(wf, run.org_id)
+        new_ids: list[str] = []
+
+        for idx, draft in enumerate(drafts):
+            # Idempotency: if a post already exists for this
+            # (run_id, platform_name) pair on retry, skip.
+            tag = f"{draft.platform_name}:{idx}"
+            if tag in run.metadata.get("review_post_tags", []):
+                continue
+
+            target = self._match_platform_for_draft(draft, platforms)
+            if target is None:
+                run.append(AgentTraceEvent(
+                    agent="critique", event="review_post_skipped_no_platform",
+                    payload={"draft_platform": draft.platform_name},
+                ))
+                continue
+
+            # Attach the matching evaluation by index — evaluator output
+            # is parallel to state.drafts (same order).
+            eval_obj = None
+            if evaluations and idx < len(evaluations):
+                eval_obj = evaluations[idx]
+
+            post = Post.from_draft(
+                org_id=run.org_id, workflow_id=wf.id, run_id=run.id,
+                platform_id=target.id, draft=draft, evaluation=eval_obj,
+            )
+            post.status = PostStatus.REVIEW
+            # Stash critique notes + reason on the post so the Reviews
+            # UI can show "why this needs human eyes".
+            post.error = None
+            try:
+                await self.post_repo.add(post)
+            except Exception as exc:                                  # noqa: BLE001
+                log.warning("review_post_persist_failed",
+                            run_id=str(run.id),
+                            platform=draft.platform_name,
+                            error=str(exc))
+                continue
+
+            new_ids.append(str(post.id))
+            run.metadata.setdefault("review_post_tags", []).append(tag)
+
+        if new_ids:
+            run.metadata["review_post_ids"] = sorted(already.union(new_ids))
+            run.append(AgentTraceEvent(
+                agent="critique", event="drafts_persisted_for_review",
+                payload={"reason": reason,
+                         "count": len(new_ids),
+                         "post_ids": new_ids},
+            ))
+        return new_ids
 
     def _match_platform_for_draft(self, draft: DraftPost, platforms):
         """Pick the Platform row matching this draft's target. Match
