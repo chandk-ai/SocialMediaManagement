@@ -259,6 +259,15 @@ class DurableWorkflowRunner:
             out["done"] = True
         if result.next_phase:
             out["next"] = result.next_phase
+        # Always surface the run's current revision counter — every
+        # phase in a revision cycle (execute → critique → execute →
+        # critique …) needs it in its idempotency key so each
+        # revision's job is distinct from the prior one. Without this,
+        # the second critique after a "revise" decision dedupes
+        # against the first critique and the chain stops silently.
+        revision = int(run.metadata.get("rerun_count", 0) or 0)
+        if revision > 0 and "rerun_count" not in out:
+            out["rerun_count"] = revision
         return out
 
     # ── phase: select ──────────────────────────────────────────────
@@ -599,7 +608,19 @@ class DurableWorkflowRunner:
             run.error = "critique aborted run"
             return PhaseResult(done=True, extras={"reason": "aborted"})
 
-        # APPROVE (or None — accepts)
+        # APPROVE (or None — accepts).
+        # If the workflow requires human approval, route to AWAITING_REVIEW
+        # instead of auto-publishing. Otherwise the require_human_approval
+        # flag would be silently ignored when critique returns APPROVE.
+        # ESCALATE already does this above; APPROVE must respect it too.
+        if getattr(wf.config, "require_human_approval", False):
+            run.transition(RunStatus.AWAITING_REVIEW)
+            run.append(AgentTraceEvent(
+                agent="critique", event="awaiting_human_approval",
+                payload={"reason": "workflow.config.require_human_approval"},
+            ))
+            return PhaseResult(extras={"requires_review": True,
+                                       "auto_approved": True})
         return PhaseResult(next_phase="publish")
 
     # ── phase: publish ─────────────────────────────────────────────
