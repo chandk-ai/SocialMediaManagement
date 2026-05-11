@@ -2,37 +2,139 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ─── Design tokens ──────────────────────────────────────────────────
+   CSS variables mirror Tailwind tokens so unrelated stylesheets
+   (third-party widgets, charts) can pick up the same colours
+   without a Tailwind context. */
 :root {
   --bg: theme('colors.ink.50');
   --fg: theme('colors.ink.900');
-  --border: theme('colors.ink.200');
   --muted: theme('colors.ink.500');
+  --border: theme('colors.ink.200');
+  --accent: theme('colors.accent.DEFAULT');
+  --accent-soft: theme('colors.accent.soft');
+  --accent-muted: theme('colors.accent.muted');
 }
 
 html, body {
   background: var(--bg);
   color: var(--fg);
   font-family: theme('fontFamily.sans');
-  font-feature-settings: 'cv11','ss01';
+  /* Inter's stylistic features — cv11 + ss01 give a slightly more
+     polished feel (single-storey ‘a’ disabled, refined ‘1’). */
+  font-feature-settings: 'cv11', 'ss01', 'cv02', 'cv03';
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }
 
+/* Subtle gradient backdrop on the page canvas. Cards float over this
+   instead of sitting on a flat #f8f9fb — tiny but it's the difference
+   between "designed" and "default Tailwind app". */
+body {
+  background-image: theme('backgroundImage.page-grad');
+  background-attachment: fixed;
+}
+
+/* Native scrollbars get a refined skin so they don't look like
+   default browser chrome. Hidden on touch devices via the
+   ``@media (hover: none)`` guard so mobile keeps its native bars. */
+@media (hover: hover) {
+  *::-webkit-scrollbar { width: 10px; height: 10px; }
+  *::-webkit-scrollbar-track { background: transparent; }
+  *::-webkit-scrollbar-thumb {
+    background: theme('colors.ink.200');
+    border: 2px solid transparent;
+    background-clip: content-box;
+    border-radius: 999px;
+  }
+  *::-webkit-scrollbar-thumb:hover { background-color: theme('colors.ink.300'); background-clip: content-box; }
+}
+
+/* Selection — accent-tinted instead of system blue. */
+::selection { background: theme('colors.accent.muted'); color: theme('colors.accent.strong'); }
+
+/* Focus-visible — replaces the default browser ring with our token
+   so every interactive element shares the same hue. */
+*:focus-visible {
+  outline: 2px solid theme('colors.accent.DEFAULT');
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+
 @layer components {
+  /* Surface — bordered rounded rectangle. Hover gets a touch of
+     lift so cards feel interactive without big shadows. */
   .card {
-    @apply bg-white border border-ink-200 rounded-2xl shadow-card;
+    @apply bg-white border border-ink-200/70 rounded-2xl shadow-card-sm;
   }
+  .card-interactive {
+    @apply card transition-all duration-200 ease-out-quart
+           hover:shadow-card hover:border-ink-200
+           hover:-translate-y-px;
+  }
+
+  /* Inputs — slightly tighter radius for a more refined feel,
+     subtle focus ring tinted with the accent. */
   .input {
-    @apply w-full rounded-xl border border-ink-200 bg-white px-3 py-2 text-sm
-           placeholder:text-ink-500 focus:outline-none focus:ring-2 focus:ring-accent/30
-           focus:border-accent;
+    @apply w-full rounded-lg border border-ink-200 bg-white px-3 py-2 text-sm
+           text-ink-900 placeholder:text-ink-400
+           shadow-card-sm
+           transition-colors duration-150
+           focus:outline-none focus:border-accent focus:shadow-ring-accent
+           disabled:bg-ink-50 disabled:cursor-not-allowed;
   }
+
+  /* Buttons — base. Variants compose on top. */
   .btn {
-    @apply inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2 text-sm
-           font-medium transition-colors disabled:opacity-50;
+    @apply inline-flex items-center justify-center gap-2 rounded-lg
+           px-3.5 py-2 text-sm font-medium
+           transition-all duration-150 ease-out-quart
+           disabled:opacity-50 disabled:cursor-not-allowed
+           focus-visible:outline-none focus-visible:shadow-ring-accent;
   }
-  .btn-primary { @apply btn bg-accent text-accent-fg hover:bg-accent/90; }
+  /* Primary uses the accent gradient — gives the most-used CTA a
+     touch of depth without resorting to drop shadows. */
+  .btn-primary {
+    @apply btn text-accent-fg shadow-card-sm
+           bg-[image:linear-gradient(180deg,theme(colors.accent.soft),theme(colors.accent.DEFAULT))]
+           hover:bg-[image:linear-gradient(180deg,theme(colors.accent.DEFAULT),theme(colors.accent.strong))]
+           active:bg-[image:linear-gradient(180deg,theme(colors.accent.strong),theme(colors.accent.strong))];
+  }
   .btn-ghost   { @apply btn text-ink-700 hover:bg-ink-100; }
-  .btn-outline { @apply btn border border-ink-200 hover:bg-ink-100; }
+  .btn-outline {
+    @apply btn border border-ink-200 bg-white text-ink-800
+           hover:bg-ink-50 hover:border-ink-300;
+  }
+  /* Size modifiers — compose with any btn-* variant.
+     ``btn-xs`` is the same height as inline icon-only buttons. */
+  .btn-xs { @apply px-2 py-1 text-xs gap-1 rounded-md; }
+  .btn-sm { @apply px-3 py-1.5 text-xs gap-1.5; }
+
+  /* Badge — neutral pill, callers tint via tone classes. */
   .badge {
-    @apply inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium;
+    @apply inline-flex items-center px-2 py-0.5 rounded-full
+           text-[11px] font-medium tracking-wide;
+  }
+
+  /* Kbd — for ⌘K-style hints. */
+  .kbd {
+    @apply inline-flex items-center gap-0.5 px-1.5 py-0.5
+           rounded-md border border-ink-200 bg-white
+           font-mono text-[10px] text-ink-600 shadow-card-sm;
+  }
+}
+
+
+@layer utilities {
+  /* Tabular numerals — for metrics dashboards where digits need
+     to align column-wise. Apply with class="tabular". */
+  .tabular { font-variant-numeric: tabular-nums; }
+
+  /* Frosted-glass surface — used by the sticky top bar. */
+  .glass {
+    @apply bg-white/85 backdrop-blur
+           supports-[backdrop-filter]:bg-white/65;
   }
 }

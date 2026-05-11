@@ -34,6 +34,7 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { Wordmark } from '@/components/brand/Logo';
 
 type NavGroup = 'top' | 'setup' | 'operate' | 'insights' | 'admin' | 'help';
 
@@ -113,10 +114,14 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: {
         'fixed inset-y-0 left-0 transition-transform lg:static lg:flex',
         mobileOpen ? 'flex translate-x-0' : 'hidden -translate-x-full lg:translate-x-0',
       )}>
-        <div className="flex items-center justify-between mb-4 px-3 py-2">
-          <Link href="/dashboard" className="flex items-center gap-2" onClick={onMobileClose}>
-            <div className="size-7 rounded-lg bg-accent" />
-            <span className="font-semibold tracking-tight">SMMS</span>
+        <div className="flex items-center justify-between mb-5 px-2 py-1">
+          <Link
+            href="/dashboard"
+            onClick={onMobileClose}
+            className="rounded-lg -mx-1 px-1 py-1 hover:bg-ink-100 transition-colors"
+            aria-label="SMMS — go to dashboard"
+          >
+            <Wordmark variant="full" />
           </Link>
           {mobileOpen && (
             <button onClick={onMobileClose} className="lg:hidden text-ink-500">
@@ -165,8 +170,10 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: {
           })}
         </nav>
 
-        <div className="mt-auto px-3 pt-4 text-xs text-ink-500">
-          v0.1.0 · plug-and-play
+        <div className="mt-auto px-3 pt-4 border-t border-ink-100 text-[10px] uppercase tracking-[0.14em] text-ink-400 font-medium">
+          <span className="text-ink-500">v0.1.0</span>
+          <span className="mx-1.5 text-ink-300">·</span>
+          plug-and-play
         </div>
       </aside>
     </>

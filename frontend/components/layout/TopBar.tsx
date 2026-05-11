@@ -1,6 +1,6 @@
 'use client';
 /**
- * Top bar — hamburger (mobile), breadcrumbs, global search, bell, user menu.
+ * Top bar — hamburger (mobile), breadcrumbs, user menu.
  *
  * ``title`` is retained for back-compat with pages that haven't been
  * updated to rely on breadcrumbs alone. When supplied, it renders as
@@ -10,8 +10,15 @@
  *
  * Pages with dynamic detail labels (source name, workflow name, …)
  * pass ``crumbOverrides`` keyed by URL segment; see Breadcrumbs.tsx.
+ *
+ * Subtle frosted-glass backdrop on scroll-sticky use: the
+ * ``bg-white/85`` + backdrop-blur gives the bar a sense of depth
+ * over scrolled content without losing legibility. The bell and
+ * global search were removed — neither was wired to a real backend.
+ * When notifications + search become real features they get their
+ * own dedicated UI, not a placeholder icon.
  */
-import { Bell, Menu, Search } from 'lucide-react';
+import { Menu } from 'lucide-react';
 import { UserMenu } from './UserMenu';
 import { Breadcrumbs } from './Breadcrumbs';
 
@@ -25,8 +32,8 @@ export function TopBar({
   onMenuClick?: () => void;
 }) {
   return (
-    <header className="border-b border-ink-200 bg-white">
-      <div className="px-4 sm:px-6 pt-2 pb-2 flex items-center gap-3">
+    <header className="border-b border-ink-200/80 bg-white/85 backdrop-blur supports-[backdrop-filter]:bg-white/65 sticky top-0 z-30">
+      <div className="px-4 sm:px-6 pt-2.5 pb-2.5 flex items-center gap-3">
         <button
           onClick={onMenuClick}
           aria-label="Open menu"
@@ -42,21 +49,7 @@ export function TopBar({
             </h1>
           )}
         </div>
-        <div className="ml-auto flex items-center gap-3 shrink-0">
-          <div className="relative hidden md:block">
-            <Search size={14} className="absolute left-3 top-2.5 text-ink-500" />
-            <input
-              className="input pl-8 w-48 lg:w-64"
-              placeholder="Search workflows, posts…"
-              aria-label="Search"
-            />
-          </div>
-          <button
-            className="btn-ghost size-9 p-0 rounded-full"
-            aria-label="Notifications"
-          >
-            <Bell size={16} />
-          </button>
+        <div className="ml-auto flex items-center gap-2 shrink-0">
           <UserMenu />
         </div>
       </div>
