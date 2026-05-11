@@ -275,11 +275,13 @@ class DurableWorkflowRunner:
             return PhaseResult(done=True, extras={"reason": "empty",
                                                    "count": 0})
 
-        # Build the strategy.
+        # Build the strategy. registry.get raises PluginNotRegisteredError
+        # on miss — catch and fall back to the always-present freshness.
         strategy_name = wf.config.selection_strategy or "freshness"
-        StrategyCls = self.registry.get(PluginKind.SELECTION, strategy_name)
-        if StrategyCls is None:
-            StrategyCls = self.registry.get(PluginKind.SELECTION, "freshness")
+        try:
+            StrategyCls = self.registry.get(PluginKind.SELECTION, strategy_name).cls
+        except Exception:                                            # noqa: BLE001
+            StrategyCls = self.registry.get(PluginKind.SELECTION, "freshness").cls
         strategy = StrategyCls(wf.config.selection_config or {})
 
         # Consumed keys for de-dup.
@@ -759,10 +761,19 @@ class DurableWorkflowRunner:
         plat_key = str(target_platform.kind)
 
         async def _do():
-            adapter_cls = self.registry.get(PluginKind.PLATFORM, plat_key)
-            if adapter_cls is None:
+            try:
+                adapter_cls = self.registry.get(PluginKind.PLATFORM, plat_key).cls
+            except Exception:                                        # noqa: BLE001
                 raise PermanentError(f"no adapter for platform {plat_key}")
-            adapter = adapter_cls()
+            # Pass OAuth credentials + per-account config so the adapter
+            # can authenticate against the platform API.
+            try:
+                adapter = adapter_cls(
+                    credentials=getattr(target_platform, "credentials", None),
+                    config=getattr(target_platform, "config", None),
+                )
+            except TypeError:
+                adapter = adapter_cls()
             # Append hashtag block after a blank line — same convention
             # the inline path uses (PostPayload.content is the literal
             # text the platform receives).

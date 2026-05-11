@@ -1,7 +1,8 @@
 'use client';
 import { Component, ErrorInfo, ReactNode } from 'react';
+import Link from 'next/link';
 import { Button } from './Button';
-import { AlertTriangle } from 'lucide-react';
+import { AlertTriangle, Home } from 'lucide-react';
 
 type State = { hasError: boolean; message?: string };
 
@@ -47,9 +48,15 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, State> {
           <p className="text-sm text-ink-500 mb-4">
             {this.state.message ?? 'An unexpected error occurred.'}
           </p>
-          <div className="flex justify-center gap-2">
+          <div className="flex flex-wrap justify-center gap-2">
             <Button variant="outline" onClick={() => location.reload()}>Reload</Button>
             <Button onClick={this.reset}>Try again</Button>
+            {/* Last-resort escape — if the page is broken in a way that
+                Reload won't fix (bad state, stale token, schema drift)
+                this is the user's way out without typing a URL. */}
+            <Link href="/dashboard" className="btn btn-ghost inline-flex items-center gap-1">
+              <Home size={14}/> Back to dashboard
+            </Link>
           </div>
         </div>
       </div>

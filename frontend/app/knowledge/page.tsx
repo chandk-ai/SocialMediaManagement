@@ -15,6 +15,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '@/lib/api/client';
 import { toast } from '@/components/ui/Toast';
+import { AppShell } from '@/components/layout/AppShell';
 import { BookOpen, Plus, Trash2, Search, Sparkles } from 'lucide-react';
 
 type Doc = {
@@ -118,10 +119,10 @@ export default function KnowledgePage() {
   }, [docs]);
 
   return (
+    <AppShell>
     <div className="p-6 max-w-6xl mx-auto space-y-6">
       <header className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold flex items-center gap-2"><BookOpen size={20}/> Brand-voice knowledge base</h1>
           <p className="text-sm text-ink-600">Pillar 4 — examples, style guides, and compliance docs the AI agents retrieve from at generation time.</p>
         </div>
         <button className="btn btn-primary" onClick={() => setShowAdd(s => !s)}>
@@ -205,5 +206,6 @@ export default function KnowledgePage() {
         ))
       )}
     </div>
+    </AppShell>
   );
 }

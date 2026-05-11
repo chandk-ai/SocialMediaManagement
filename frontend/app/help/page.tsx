@@ -38,7 +38,11 @@ type Topic = {
   id: string;
   title: string;
   icon: LucideIcon;
-  group: 'start' | 'using' | 'help';
+  group: 'start' | 'using' | 'ops' | 'help';
+  // Topics whose content lives inside a larger section render that
+  // parent section and then scroll to the topic's matching H2#id.
+  // Leave undefined for top-level topics that own their own section.
+  parent?: string;
 };
 
 const TOPICS: Topic[] = [
@@ -48,14 +52,28 @@ const TOPICS: Topic[] = [
   { id: 'connecting-platforms',title: 'Connecting platforms',     icon: Plug,           group: 'using' },
   { id: 'adding-sources',      title: 'Adding sources',           icon: Database,       group: 'using' },
   { id: 'building-workflows',  title: 'Building workflows',       icon: Workflow,       group: 'using' },
+  // Pillar 5 — Tailor agent (per-platform variants). H2 lives inside
+  // building-workflows so the user can read it in context.
+  { id: 'tailor-agent',        title: 'Tailor (per-platform)',    icon: Workflow,       group: 'using', parent: 'building-workflows' },
+  // Pillar 4 — RAG / brand-voice KB. Same parent for now.
+  { id: 'knowledge-base',      title: 'Brand-voice KB',           icon: BookOpen,       group: 'using', parent: 'building-workflows' },
   { id: 'reviews-approval',    title: 'Reviews & approval',       icon: MessageSquare,  group: 'using' },
   { id: 'llm-setup',           title: 'AI / LLM setup',           icon: Brain,          group: 'using' },
   { id: 'calendar',            title: 'Calendar & scheduling',    icon: Calendar,       group: 'using' },
   { id: 'analytics',           title: 'Analytics',                icon: BarChart3,      group: 'using' },
+  // Pillar 3 — engagement insights. Lives under building-workflows for
+  // now; routes here scroll to #engagement-loop.
+  { id: 'engagement-loop',     title: 'Engagement insights',      icon: BarChart3,      group: 'using', parent: 'building-workflows' },
   { id: 'triggers',            title: 'Chat triggers',            icon: Zap,            group: 'using' },
   { id: 'compliance',          title: 'Compliance scanning',      icon: ShieldCheck,    group: 'using' },
   { id: 'experiments',         title: 'A/B experiments',          icon: FlaskConical,   group: 'using' },
   { id: 'adaptive-schedule',   title: 'Adaptive scheduling',      icon: Activity,       group: 'using' },
+
+  // Operations — what an admin / on-call cares about. All scroll into
+  // dedicated H2s inside building-workflows.
+  { id: 'durable-engine',      title: 'Durable run engine',       icon: Activity,       group: 'ops', parent: 'building-workflows' },
+  { id: 'observability',       title: 'Observability',            icon: Activity,       group: 'ops', parent: 'building-workflows' },
+  { id: 'plugin-sdk',          title: 'Plugin SDK',               icon: ExternalLink,   group: 'ops', parent: 'building-workflows' },
 
   { id: 'troubleshooting',     title: 'Troubleshooting',          icon: AlertCircle,    group: 'help' },
   { id: 'faq',                 title: 'FAQ',                      icon: HelpCircle,     group: 'help' },
@@ -65,12 +83,22 @@ const TOPICS: Topic[] = [
 const GROUP_LABELS: Record<string, string> = {
   start: 'Get going',
   using: 'How to use',
+  ops:   'Operations',
   help:  'Reference',
 };
 
 export default function HelpPage() {
   const [active, setActive] = useState<string>('getting-started');
   const [query, setQuery] = useState('');
+
+  // Resolve the section to render: if `active` is a sub-topic with a
+  // parent, render the parent's component and (in a follow-up effect)
+  // scroll to the matching H2#id. Otherwise the active topic IS the
+  // section.
+  const sectionId = (() => {
+    const t = TOPICS.find(x => x.id === active);
+    return t?.parent ?? active;
+  })();
 
   // On mount: jump to URL hash if present
   useEffect(() => {
@@ -79,10 +107,22 @@ export default function HelpPage() {
     if (h && TOPICS.find(t => t.id === h)) setActive(h);
   }, []);
 
-  // Update URL hash when active changes
+  // Update URL hash when active changes + scroll to matching H2 for
+  // sub-topic entries so the user lands directly on the right block.
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      history.replaceState(null, '', `#${active}`);
+    if (typeof window === 'undefined') return;
+    history.replaceState(null, '', `#${active}`);
+    const t = TOPICS.find(x => x.id === active);
+    if (t?.parent) {
+      // Wait for the parent section to render, then scroll.
+      requestAnimationFrame(() => {
+        const el = document.getElementById(active);
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    } else {
+      // Top-level topic — scroll the content pane to the top.
+      const main = document.querySelector('article');
+      if (main) main.scrollTop = 0;
     }
   }, [active]);
 
@@ -107,7 +147,7 @@ export default function HelpPage() {
                 className="pl-8"
               />
             </div>
-            {(['start', 'using', 'help'] as const).map(g => {
+            {(['start', 'using', 'ops', 'help'] as const).map(g => {
               const inGroup = filtered.filter(t => t.group === g);
               if (inGroup.length === 0) return null;
               return (
@@ -153,22 +193,25 @@ export default function HelpPage() {
               ))}
             </select>
 
-            {active === 'getting-started'      && <GettingStarted />}
-            {active === 'concepts'             && <CoreConcepts />}
-            {active === 'connecting-platforms' && <ConnectingPlatforms />}
-            {active === 'adding-sources'       && <AddingSources />}
-            {active === 'building-workflows'   && <BuildingWorkflows />}
-            {active === 'reviews-approval'     && <ReviewsApproval />}
-            {active === 'llm-setup'            && <LlmSetup />}
-            {active === 'calendar'             && <CalendarHelp />}
-            {active === 'analytics'            && <AnalyticsHelp />}
-            {active === 'triggers'             && <TriggersHelp />}
-            {active === 'compliance'           && <ComplianceHelp />}
-            {active === 'experiments'          && <ExperimentsHelp />}
-            {active === 'adaptive-schedule'    && <AdaptiveScheduleHelp />}
-            {active === 'troubleshooting'      && <Troubleshooting />}
-            {active === 'faq'                  && <Faq />}
-            {active === 'glossary'             && <Glossary />}
+            {/* Section resolution honours a topic's ``parent`` so e.g.
+                clicking "Durable run engine" routes here as
+                <BuildingWorkflows/> with #durable-engine then scrolls. */}
+            {sectionId === 'getting-started'      && <GettingStarted />}
+            {sectionId === 'concepts'             && <CoreConcepts />}
+            {sectionId === 'connecting-platforms' && <ConnectingPlatforms />}
+            {sectionId === 'adding-sources'       && <AddingSources />}
+            {sectionId === 'building-workflows'   && <BuildingWorkflows />}
+            {sectionId === 'reviews-approval'     && <ReviewsApproval />}
+            {sectionId === 'llm-setup'            && <LlmSetup />}
+            {sectionId === 'calendar'             && <CalendarHelp />}
+            {sectionId === 'analytics'            && <AnalyticsHelp />}
+            {sectionId === 'triggers'             && <TriggersHelp />}
+            {sectionId === 'compliance'           && <ComplianceHelp />}
+            {sectionId === 'experiments'          && <ExperimentsHelp />}
+            {sectionId === 'adaptive-schedule'    && <AdaptiveScheduleHelp />}
+            {sectionId === 'troubleshooting'      && <Troubleshooting />}
+            {sectionId === 'faq'                  && <Faq />}
+            {sectionId === 'glossary'             && <Glossary />}
           </article>
         </main>
       </div>
@@ -670,6 +713,20 @@ function BuildingWorkflows() {
           a force-sweep for stuck jobs.
         </li>
       </Bullets>
+      <P>
+        <strong>Using the /admin/jobs page:</strong> the six counter
+        tiles up top refresh every 5s. Click any row to slide a detail
+        drawer in from the right with the full payload, result and
+        error stacktrace, plus a link to the run's trace. Per-row
+        cancel/retry actions live on the right of each row.{' '}
+        <strong>Retry all dead</strong> in the toolbar drains the DLQ
+        in one click — useful after a platform outage closes — but
+        confirm only after the root cause is fixed, otherwise jobs
+        immediately die again. <strong>Sweep</strong> promotes stale
+        ``running`` jobs (worker crashed) back to ``queued`` for
+        re-claiming; it also runs automatically every 60s in the
+        background.
+      </P>
 
       <H2 id="observability">Observability spine</H2>
       <P>
@@ -701,7 +758,7 @@ function BuildingWorkflows() {
       <P>
         After each publish, the runner schedules{' '}
         <code>engagement.fetch</code> at T+1h and T+24h. The fetcher
-        calls the platform adapter's <code>get_metrics()</code> and
+        calls the platform adapter's <code>fetch_metrics()</code> and
         writes a row to <code>smms.post_metrics</code>. The aggregator
         rolls those snapshots into per-(source, strategy, platform,
         hour, weekday) summaries. The analytics page at{' '}
@@ -709,6 +766,25 @@ function BuildingWorkflows() {
         ranks each dimension. The selection layer's new{' '}
         <code>engagement_weighted</code> strategy biases ranking toward
         sources whose past posts performed best.
+      </P>
+      <P>
+        <strong>Using the /analytics/engagement page:</strong> the
+        dimension pills at the top switch which axis you're ranking
+        by — by source, by strategy, by platform, by hour-of-day, by
+        weekday, or by workflow. Bars are normalised to the row's max.
+        The <em>n</em> column on the right shows sample size — bars
+        with low n are noisy, treat as directional. Click{' '}
+        <em>Recompute rollup</em> to refresh the aggregates after
+        a manual metrics fetch. The aggregate worker job runs every
+        10 minutes per active org in the background.
+      </P>
+      <P>
+        Currently the platforms with real metrics implementations are{' '}
+        <strong>LinkedIn</strong> (reactions + comments via
+        /socialActions), <strong>X / Twitter</strong> (full public_metrics
+        block) and <strong>Instagram</strong> (impressions + reach + saves
+        + likes + comments). Other platform adapters return empty
+        snapshots until their <code>fetch_metrics()</code> is implemented.
       </P>
 
       <H2 id="knowledge-base">Brand-voice knowledge base</H2>
@@ -721,6 +797,16 @@ function BuildingWorkflows() {
         Tailor + Execute phases query the KB and inject the top-K
         relevant chunks into the prompt — every org's outputs get more
         on-brand the more material the corpus has.
+      </P>
+      <P>
+        <strong>Using the /knowledge page:</strong> click{' '}
+        <em>Add document</em>, pick the kind (Brand example / Style
+        guide / Compliance / Past post), paste content. Long docs are
+        auto-chunked. The <em>Test the retriever</em> panel lets you
+        run the same semantic search the agents use — useful for
+        confirming you've added the right material. Auto-ingest of
+        top-decile posts (engagement-driven) runs hourly in the
+        background — those appear under <em>Past post</em>.
       </P>
 
       <H2 id="tailor-agent">Tailor agent — per-platform variants</H2>
@@ -756,6 +842,19 @@ python backend/scripts/smms_plugin.py package ./plugins/my_rss`}</code></pre>
         Drop the directory under <code>backend/app/plugins/</code> (or any
         package the manager scans), restart, and the plugin appears in
         the marketplace + every relevant wizard picker.
+      </P>
+      <P>
+        <strong>Using the /admin/plugins page:</strong> the global
+        search bar at the top filters across every kind — type
+        "anthropic", "rss" or "linkedin" to jump to it. The
+        <em>in use × N</em> badge on each row tells you how many
+        workflows / sources / platforms currently reference that
+        plugin, so you know what's safe to disable. Click any row to
+        open the detail pane: it renders the config_schema as a live
+        form and runs <code>POST /marketplace/validate</code> against
+        the server when you click <em>Validate config</em>. The
+        <em>Author a similar plugin</em> disclosure shows the exact
+        <code>smms-plugin init</code> command for that plugin's kind.
       </P>
 
       <H2 id="wf-context">Where the agent's behaviour comes from</H2>

@@ -27,17 +27,29 @@ from app.plugins.registry import PluginKind, PluginRegistry
 router = APIRouter()
 
 
-def _ser_plugin(kind: str, name: str, cls) -> dict[str, Any]:
+def _ser_entry(entry) -> dict[str, Any]:
+    """Serialize a PluginEntry into the marketplace shape. ``entry.cls``
+    is the registered class — we pull display metadata + config_schema
+    from there since that's where @register_plugin decorators stash it."""
+    cls = entry.cls
+    name = entry.name
     return {
-        "kind": kind, "name": name,
-        "display_name": getattr(cls, "display_name", name),
-        "description": getattr(cls, "description", ""),
-        "api_version": getattr(cls, "api_version", "1.0"),
-        "category": getattr(cls, "category", "builtin"),
+        "kind": entry.kind.value,
+        "name": name,
+        "display_name": getattr(cls, "display_name", "") or name,
+        "description": getattr(cls, "description", "") or "",
+        "api_version": entry.api_version,
+        "category": (entry.metadata.get("category")
+                     if entry.metadata else None)
+                    or getattr(cls, "category", "builtin"),
         "needs_llm": bool(getattr(cls, "needs_llm", False)),
-        "experimental": bool(getattr(cls, "experimental", False)),
-        "config_schema": getattr(cls, "config_schema",
-                                  {"type": "object", "properties": {}}),
+        "experimental": bool(
+            (entry.metadata or {}).get("experimental")
+            or getattr(cls, "experimental", False)
+        ),
+        "config_schema": getattr(
+            cls, "config_schema", {"type": "object", "properties": {}}
+        ),
     }
 
 
@@ -51,10 +63,8 @@ async def catalog(
     truth between admin marketplace + per-feature pickers."""
     out: dict[str, list[dict[str, Any]]] = {}
     for kind in PluginKind:
-        items = []
-        for name, cls in registry.iter(kind):
-            items.append(_ser_plugin(kind.value, name, cls))
-        items.sort(key=lambda p: p["display_name"].lower())
+        items = [_ser_entry(e) for e in registry.list(kind)]
+        items.sort(key=lambda p: (p["display_name"] or "").lower())
         out[kind.value] = items
     return {"kinds": out, "total": sum(len(v) for v in out.values())}
 
@@ -69,11 +79,12 @@ async def get_plugin(
         kind_enum = PluginKind(kind)
     except ValueError:
         raise HTTPException(status_code=404, detail=f"unknown kind: {kind}")
-    cls = registry.get(kind_enum, name)
-    if cls is None:
+    try:
+        entry = registry.get(kind_enum, name)
+    except Exception:                                                # noqa: BLE001
         raise HTTPException(status_code=404,
-                            detail=f"plugin {kind}/{name} not found")
-    return _ser_plugin(kind, name, cls)
+                             detail=f"plugin {kind}/{name} not found")
+    return _ser_entry(entry)
 
 
 class ValidateBody(BaseModel):
@@ -94,12 +105,13 @@ async def validate_config(
         kind_enum = PluginKind(body.kind)
     except ValueError:
         raise HTTPException(status_code=404, detail=f"unknown kind: {body.kind}")
-    cls = registry.get(kind_enum, body.name)
-    if cls is None:
+    try:
+        entry = registry.get(kind_enum, body.name)
+    except Exception:                                                # noqa: BLE001
         raise HTTPException(status_code=404,
-                            detail=f"plugin {body.kind}/{body.name} not found")
-    schema = getattr(cls, "config_schema", {"type": "object",
-                                              "properties": {}})
+                             detail=f"plugin {body.kind}/{body.name} not found")
+    schema = getattr(entry.cls, "config_schema",
+                      {"type": "object", "properties": {}})
     errors = _validate(body.config, schema)
     return {"ok": not errors, "errors": errors}
 

@@ -21,6 +21,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '@/lib/api/client';
 import { toast } from '@/components/ui/Toast';
+import { AppShell } from '@/components/layout/AppShell';
 import { Activity, BarChart3, RefreshCw, TrendingUp } from 'lucide-react';
 
 type Result = {
@@ -87,10 +88,10 @@ export default function EngagementAnalyticsPage() {
   const dimMeta = DIMS.find(d => d.key === dim)!;
 
   return (
+    <AppShell>
     <div className="p-6 max-w-6xl mx-auto space-y-6">
       <header className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold flex items-center gap-2"><BarChart3 size={20}/> Engagement insights</h1>
           <p className="text-sm text-ink-600">Pillar 3 — what's actually working, attributed to source / strategy / time / platform.</p>
         </div>
         <div className="flex gap-2">
@@ -190,5 +191,6 @@ export default function EngagementAnalyticsPage() {
         )}
       </div>
     </div>
+    </AppShell>
   );
 }
