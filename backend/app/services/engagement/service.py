@@ -205,12 +205,11 @@ class PostgresEngagementService(EngagementService):
                 )
                 SELECT p.id::text, p.workflow_id::text, p.run_id::text,
                        p.platform_id::text,
-                       pl.kind AS platform_kind,
+                       pl.plugin_name AS platform_kind,
                        p.published_at,
                        latest.likes, latest.comments, latest.shares,
                        latest.impressions, latest.reach, latest.clicks,
-                       latest.saves, latest.plays, latest.watch_time_s,
-                       p.metadata
+                       latest.saves, latest.plays, latest.watch_time_s
                   FROM latest
                   JOIN smms.posts p ON p.id = latest.post_id
              LEFT JOIN smms.platforms pl ON pl.id = p.platform_id
@@ -218,7 +217,8 @@ class PostgresEngagementService(EngagementService):
             """), {"org": org_id})
             rows = r.fetchall()
 
-        # Compute aggregates in Python — small N per org.
+        # Compute aggregates in Python — small N per org. ``Post`` has
+        # no metadata field on the entity, so we don't carry one here.
         post_dicts = []
         for row in rows:
             post_dicts.append({
@@ -229,7 +229,6 @@ class PostgresEngagementService(EngagementService):
                 "impressions": row[9], "reach": row[10], "clicks": row[11],
                 "saves": row[12], "plays": row[13],
                 "watch_time_s": row[14],
-                "metadata": row[15] or {},
             })
 
         rollup_rows: list[dict[str, Any]] = []
@@ -369,34 +368,44 @@ async def _adapter_fetch(
     if post_repo is None or platform_repo is None or registry is None:
         return None
     try:
-        from app.domain.value_objects.ids import PostId
-        post = await post_repo.get(PostId(post_id))
+        # Repos are org-scoped — every .get() takes (org_id, entity_id).
+        # Coerce the string org_id to the typed OrgId once.
+        from app.domain.value_objects.ids import OrgId, PostId
+        from uuid import UUID
+        org_typed = OrgId(UUID(org_id) if isinstance(org_id, str) else org_id)
+
+        post = await post_repo.get(org_typed, PostId(post_id))
         if post is None:
             return None
-        platform = await platform_repo.get(post.platform_id)
+        platform = await platform_repo.get(org_typed, post.platform_id)
         if platform is None:
             return None
+        # Platform.plugin_name is the registry key, NOT a ``.kind``
+        # attribute. We keep the ``platform_kind`` JSON key in the
+        # snapshot because that's what the attribution + rollup tables
+        # use — internal column name, not a domain concept.
         from app.plugins.registry import PluginKind
-        entry = registry.get(PluginKind.PLATFORM, str(platform.kind))
-        adapter_cls = entry.cls if hasattr(entry, "cls") else entry
-        if adapter_cls is None:
-            return None
+        plugin_name = platform.plugin_name
+        try:
+            entry = registry.get(PluginKind.PLATFORM, plugin_name)
+        except Exception:                                            # noqa: BLE001
+            return {"platform_kind": plugin_name,
+                    "fetch_error": f"no adapter registered for {plugin_name}"}
+        adapter_cls = entry.cls
         # Pass the OAuth credentials we already stored on the Platform
         # entity. Adapters need this for any authenticated read; an
         # unauthenticated adapter would 401 on every metrics fetch.
-        creds = getattr(platform, "credentials", None)
-        try:
-            adapter = adapter_cls(credentials=creds, config=getattr(platform, "config", None))
-        except TypeError:
-            # Adapters that take no kwargs.
-            adapter = adapter_cls()
+        adapter = adapter_cls(
+            credentials=getattr(platform, "credentials", None),
+            config=getattr(platform, "config", None) or {},
+        )
         ext_id = post.external_post_id
         if not ext_id:
-            return {"platform_kind": str(platform.kind),
+            return {"platform_kind": plugin_name,
                     "fetch_error": "no external_post_id"}
         snap = await adapter.fetch_metrics(ext_id)
         snap = dict(snap or {})
-        snap.setdefault("platform_kind", str(platform.kind))
+        snap.setdefault("platform_kind", plugin_name)
         return snap
     except Exception as exc:                                          # noqa: BLE001
         log.warning("engagement_adapter_fetch_failed",

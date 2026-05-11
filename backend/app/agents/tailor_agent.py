@@ -213,15 +213,20 @@ class TailorAgent:
 
     # ── helpers ────────────────────────────────────────────────────
     async def _suggest_hashtags(self, *, org_id, plat, seed) -> list[str]:
+        """Pull HashtagIntelligence-ranked hashtags for this platform.
+        The service's method is ``suggest_for(org_id, *, plugin_name,
+        seed_text, limit, exclude)`` returning ``list[HashtagSuggestion]``
+        — each suggestion exposes ``.tag``."""
         svc = self.hashtag_service
         if svc is None:
             return []
         try:
-            ranked = await svc.suggest(
-                org_id=str(org_id), platform=plat,
-                content=seed, limit=8,
+            # org_id may arrive as a string or as an OrgId; the service
+            # accepts either since it stringifies internally.
+            ranked = await svc.suggest_for(
+                org_id, plugin_name=plat, seed_text=seed, limit=8,
             )
-            tags = [h["tag"] if isinstance(h, dict) else h for h in ranked]
+            tags = [getattr(h, "tag", None) for h in ranked]
             return [t for t in tags if t][:5]
         except (AttributeError, NotImplementedError):
             return []

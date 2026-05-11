@@ -68,7 +68,7 @@ async def run_start(ctx: HandlerContext) -> dict[str, Any]:
 async def run_select(ctx: HandlerContext) -> dict[str, Any]:
     svc = _wf_service(ctx)
     run_id = UUID(ctx.job.payload["run_id"])
-    out = await svc.run_phase(run_id=run_id, phase="select")
+    out = await svc.run_phase(org_id=ctx.job.org_id, run_id=run_id, phase="select")
     if out.get("done"):
         return {"phase": "select", "stopped": True, "reason": out.get("reason")}
     await ctx.queue.enqueue(
@@ -83,7 +83,7 @@ async def run_select(ctx: HandlerContext) -> dict[str, Any]:
 async def run_plan(ctx: HandlerContext) -> dict[str, Any]:
     svc = _wf_service(ctx)
     run_id = UUID(ctx.job.payload["run_id"])
-    out = await svc.run_phase(run_id=run_id, phase="plan")
+    out = await svc.run_phase(org_id=ctx.job.org_id, run_id=run_id, phase="plan")
     next_kind = "run.tailor" if out.get("multi_platform") else "run.execute"
     await ctx.queue.enqueue(
         next_kind, ctx.job.org_id,
@@ -97,7 +97,7 @@ async def run_plan(ctx: HandlerContext) -> dict[str, Any]:
 async def run_tailor(ctx: HandlerContext) -> dict[str, Any]:
     svc = _wf_service(ctx)
     run_id = UUID(ctx.job.payload["run_id"])
-    out = await svc.run_phase(run_id=run_id, phase="tailor")
+    out = await svc.run_phase(org_id=ctx.job.org_id, run_id=run_id, phase="tailor")
     await ctx.queue.enqueue(
         "run.execute", ctx.job.org_id,
         {"run_id": str(run_id)}, run_id=run_id,
@@ -110,7 +110,7 @@ async def run_tailor(ctx: HandlerContext) -> dict[str, Any]:
 async def run_execute(ctx: HandlerContext) -> dict[str, Any]:
     svc = _wf_service(ctx)
     run_id = UUID(ctx.job.payload["run_id"])
-    out = await svc.run_phase(run_id=run_id, phase="execute")
+    out = await svc.run_phase(org_id=ctx.job.org_id, run_id=run_id, phase="execute")
     await ctx.queue.enqueue(
         "run.critique", ctx.job.org_id,
         {"run_id": str(run_id)}, run_id=run_id,
@@ -123,7 +123,7 @@ async def run_execute(ctx: HandlerContext) -> dict[str, Any]:
 async def run_critique(ctx: HandlerContext) -> dict[str, Any]:
     svc = _wf_service(ctx)
     run_id = UUID(ctx.job.payload["run_id"])
-    out = await svc.run_phase(run_id=run_id, phase="critique")
+    out = await svc.run_phase(org_id=ctx.job.org_id, run_id=run_id, phase="critique")
     if out.get("requires_review"):
         # Hand off to review — no further phase enqueued; reviewers
         # eventually call /reviews/.../approve which enqueues run.publish.
@@ -149,7 +149,7 @@ async def run_critique(ctx: HandlerContext) -> dict[str, Any]:
 async def run_publish(ctx: HandlerContext) -> dict[str, Any]:
     svc = _wf_service(ctx)
     run_id = UUID(ctx.job.payload["run_id"])
-    out = await svc.run_phase(run_id=run_id, phase="publish")
+    out = await svc.run_phase(org_id=ctx.job.org_id, run_id=run_id, phase="publish")
     # Schedule engagement-fetch follow-ups for each post — in 60min, 24h.
     for delay in (3600, 86400):
         for post_id in out.get("post_ids", []):

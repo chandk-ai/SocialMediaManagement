@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time as _time
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
@@ -328,7 +329,12 @@ async def run_durable(
         job = await queue.enqueue(
             "run.start", user.org_id,
             {"workflow_id": str(workflow_id), "trigger_kind": "manual"},
-            idempotency_key=f"start:{workflow_id}:{user.id}",
+            # Minute-bucketed key so a fast double-click is de-duped,
+            # but a deliberate re-run a minute later still goes through.
+            # Principal exposes ``subject`` (Supabase JWT sub claim), not
+            # ``id`` — using subject here so different teammates can each
+            # trigger the same workflow in the same minute distinctly.
+            idempotency_key=f"start:{workflow_id}:{user.subject}:{int(_time.time() // 60)}",
         )
     except Exception as exc:                                         # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -401,7 +407,12 @@ async def run_now(
                 "run.start", user.org_id,
                 {"workflow_id": str(workflow_id),
                  "trigger_kind": "manual"},
-                idempotency_key=f"start:{workflow_id}:{user.id}",
+                # Minute-bucketed key so a fast double-click is de-duped,
+            # but a deliberate re-run a minute later still goes through.
+            # Principal exposes ``subject`` (Supabase JWT sub claim), not
+            # ``id`` — using subject here so different teammates can each
+            # trigger the same workflow in the same minute distinctly.
+            idempotency_key=f"start:{workflow_id}:{user.subject}:{int(_time.time() // 60)}",
             )
         except Exception as exc:                                     # noqa: BLE001
             raise HTTPException(status_code=500,

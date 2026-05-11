@@ -202,13 +202,19 @@ class DurableWorkflowRunner:
         return run
 
     async def run_phase(
-        self, *, run_id: UUID | str, phase: str,
+        self, *, org_id: str | UUID, run_id: UUID | str, phase: str,
     ) -> dict[str, Any]:
+        """Run a single phase by id. ``org_id`` is required because every
+        repo's ``.get()`` is scoped to the org (no cross-tenant leakage).
+        Handlers always have ``job.org_id`` available so this is cheap."""
         rid = UUID(run_id) if isinstance(run_id, str) else run_id
-        run = await self.run_repo.get(RunId(rid))
+        oid_uuid = UUID(org_id) if isinstance(org_id, str) else org_id
+        org_typed = OrgId(oid_uuid)
+
+        run = await self.run_repo.get(org_typed, RunId(rid))
         if run is None:
             raise PermanentError(f"run {rid} not found")
-        wf = await self.repo.get(run.workflow_id)
+        wf = await self.repo.get(org_typed, run.workflow_id)
         if wf is None:
             raise PermanentError(f"workflow {run.workflow_id} not found")
 
@@ -232,22 +238,22 @@ class DurableWorkflowRunner:
                 payload={"kind": exc.kind, "target": exc.target,
                          "retry_at": exc.retry_at.isoformat()},
             ))
-            await self.run_repo.save(run)
+            await self.run_repo.update(run)
             raise RuntimeError(f"circuit open: {exc}") from exc
         except PermanentError:
             run.transition(RunStatus.FAILED)
             run.error = "phase failed permanently"
-            await self.run_repo.save(run)
+            await self.run_repo.update(run)
             raise
         except Exception as exc:                                     # noqa: BLE001
             run.append(AgentTraceEvent(
                 agent="runner", event=f"phase_{phase}_failed",
                 payload={"error": str(exc)[:1000]},
             ))
-            await self.run_repo.save(run)
+            await self.run_repo.update(run)
             raise
 
-        await self.run_repo.save(run)
+        await self.run_repo.update(run)
         out: dict[str, Any] = {**result.extras}
         if result.done:
             out["done"] = True
@@ -258,16 +264,22 @@ class DurableWorkflowRunner:
     # ── phase: select ──────────────────────────────────────────────
     async def _phase_select(self, run: WorkflowRun, wf) -> PhaseResult:
         run.transition(RunStatus.SELECTING)
-        # Load source items with metadata-tagged source_id for selection.
-        items = await load_items(
-            wf, self.source_repo, self.registry,
-            run_id=run.id, run_repo=self.run_repo,
-        )
-        # Tag each candidate with its source for de-dup later.
-        for it in items:
-            md = dict(it.metadata or {})
-            md.setdefault("source_id", str(md.get("source_id") or ""))
-            it.metadata = md
+        # Resolve the workflow's source IDs into Source rows so we can
+        # hand them to load_items. The repo's .get() is org-scoped.
+        sources = []
+        for sid in wf.source_ids:
+            try:
+                s = await self.source_repo.get(run.org_id, sid)
+                if s:
+                    sources.append(s)
+            except Exception as exc:                                 # noqa: BLE001
+                log.warning("durable_source_lookup_failed",
+                            source_id=str(sid), error=str(exc))
+
+        # Load items via the real loader signature. The loader already
+        # annotates each SourceItem.metadata in-place with source_id +
+        # source_plugin, so we don't need to do it ourselves.
+        items = await load_items(sources, self.registry)
 
         if not items:
             run.transition(RunStatus.SUCCEEDED)
@@ -284,11 +296,14 @@ class DurableWorkflowRunner:
             StrategyCls = self.registry.get(PluginKind.SELECTION, "freshness").cls
         strategy = StrategyCls(wf.config.selection_config or {})
 
-        # Consumed keys for de-dup.
+        # Consumed keys for de-dup. SourceItemsService.consumed_keys
+        # requires the source_id list as its second positional arg.
         consumed: set[tuple[str, str]] = set()
-        if self.source_items is not None:
+        if self.source_items is not None and sources:
             try:
-                consumed = await self.source_items.consumed_keys(run.org_id)
+                consumed = await self.source_items.consumed_keys(
+                    run.org_id, [s.id for s in sources],
+                )
             except Exception as exc:                                 # noqa: BLE001
                 log.warning("durable_consumed_keys_failed", error=str(exc))
 
@@ -366,7 +381,7 @@ class DurableWorkflowRunner:
     # ── phase: plan ────────────────────────────────────────────────
     async def _phase_plan(self, run: WorkflowRun, wf) -> PhaseResult:
         run.transition(RunStatus.PLANNING)
-        orch = self._build_orchestrator(run, wf, trigger="plan")
+        orch = await self._build_orchestrator(run, wf, trigger="plan")
         state = await self._build_state(run, wf,
                                           target_platforms=await self._target_platform_kinds(wf))
         state = await orch.planner.run(state)
@@ -409,7 +424,7 @@ class DurableWorkflowRunner:
             return PhaseResult(done=True, extras={"reason": "no_plan"})
 
         plan = _plan_from_dict(plan_dict)
-        orch = self._build_orchestrator(run, wf, trigger="tailor")
+        orch = await self._build_orchestrator(run, wf, trigger="tailor")
 
         # Lazy services.
         kb = None
@@ -464,7 +479,7 @@ class DurableWorkflowRunner:
             return PhaseResult(done=True, extras={"reason": "no_plan"})
 
         plan = _plan_from_dict(plan_dict)
-        orch = self._build_orchestrator(run, wf, trigger="execute")
+        orch = await self._build_orchestrator(run, wf, trigger="execute")
 
         # Pillar 4 — RAG retrieval. Build a query from directive +
         # source_summary, ask the KB for top-K chunks, splice the
@@ -521,7 +536,7 @@ class DurableWorkflowRunner:
 
         plan = _plan_from_dict(plan_dict)
         drafts = [_draft_from_dict(d) for d in drafts_dicts]
-        orch = self._build_orchestrator(run, wf, trigger="critique")
+        orch = await self._build_orchestrator(run, wf, trigger="critique")
 
         state = await self._build_state(
             run, wf,
@@ -534,11 +549,18 @@ class DurableWorkflowRunner:
         state = await orch.critique.run(state)
 
         # Persist evaluator output for the trace + the dashboard.
+        # EvaluationReport fields per app/domain/value_objects/content.py
+        # — there is no per-evaluation platform_name field; the index
+        # aligns with state.drafts so callers infer platform that way.
         run.metadata["evaluations"] = [
-            {"platform_name": e.platform_name,
-             "score": float(e.score),
-             "flags": list(getattr(e, "flags", []) or []),
-             "notes": getattr(e, "notes", "") or ""}
+            {"overall":             float(e.overall),
+             "clarity":             float(e.clarity),
+             "brand_voice":         float(e.brand_voice),
+             "compliance":          float(e.compliance),
+             "platform_fit":        float(e.platform_fit),
+             "predicted_engagement": float(e.predicted_engagement),
+             "suggestions": list(e.suggestions),
+             "flags":       list(e.flags)}
             for e in state.evaluations
         ]
         run.metadata["critique_notes"] = list(state.critique_notes)
@@ -676,47 +698,55 @@ class DurableWorkflowRunner:
         return out
 
     async def _load_platforms(self, wf, org_id):
+        """Returns the workflow's bound Platform rows. The repo's
+        .get() is org-scoped so we pass org_id."""
         plats = []
         for pid in wf.platform_ids:
             try:
-                p = await self.platform_repo.get(pid)
+                p = await self.platform_repo.get(org_id, pid)
                 if p:
                     plats.append(p)
-            except Exception:                                        # noqa: BLE001
-                pass
+            except Exception as exc:                                 # noqa: BLE001
+                log.warning("durable_platform_lookup_failed",
+                            platform_id=str(pid), error=str(exc))
         return plats
 
     async def _target_platform_kinds(self, wf) -> list[str]:
         """Resolve plugin-name strings for the workflow's platforms.
-        Falls back to the raw platform_id strings if a platform row is
-        missing — Planner will skip those Blueprints."""
-        kinds: list[str] = []
+        ``Platform.plugin_name`` (NOT ``.kind``) is the registry key
+        — the Planner uses these to fan out per-platform Blueprints."""
+        names: list[str] = []
         for pid in wf.platform_ids:
             try:
-                p = await self.platform_repo.get(pid)
+                p = await self.platform_repo.get(wf.org_id, pid)
                 if p:
-                    kinds.append(str(p.kind))
-            except Exception:                                        # noqa: BLE001
-                pass
-        return kinds or [str(p) for p in wf.platform_ids]
+                    names.append(p.plugin_name)
+            except Exception as exc:                                 # noqa: BLE001
+                log.warning("durable_platform_lookup_failed",
+                            platform_id=str(pid), error=str(exc))
+        return names or [str(p) for p in wf.platform_ids]
 
     def _match_platform_for_draft(self, draft: DraftPost, platforms):
+        """Pick the Platform row matching this draft's target. Match
+        on plugin_name since that's what the Planner's PostBlueprint
+        sets as ``platform_name``."""
         if not platforms:
             return None
         for p in platforms:
-            if str(p.kind) == draft.platform_name:
+            if p.plugin_name == draft.platform_name:
                 return p
-        # Fall back to the first platform if the kind doesn't line up.
+        # Fall back to the first platform when the plugin_name doesn't
+        # line up — better than dropping the draft entirely.
         return platforms[0]
 
-    def _build_orchestrator(self, run: WorkflowRun, wf, *, trigger: str):
-        # Bridge sync wrapper since the inner factory doesn't await on
-        # api_key resolution; the caller does that ahead of time.
-        # (Kept as a class helper so subclasses can swap.)
-        api_key = self._cached_api_key.get(str(run.id))
-        if api_key is None and self.llm_credentials is not None:
-            # Phase methods are async — they can resolve directly.
-            raise RuntimeError("call _resolve_api_key_for_run before _build_orchestrator")
+    async def _build_orchestrator(self, run: WorkflowRun, wf, *, trigger: str):
+        """Async because we may need to decrypt the api_key first.
+        Reuses a per-run cache so multi-phase runs don't re-decrypt."""
+        if str(run.id) not in self._cached_api_key:
+            self._cached_api_key[str(run.id)] = await self._resolve_llm_api_key(
+                run.org_id, wf.config.llm_provider,
+            )
+        api_key = self._cached_api_key[str(run.id)]
         return build_orchestrator(
             wf, self.registry, api_key=api_key,
             org_id=run.org_id, usage_service=self.llm_usage,
@@ -736,12 +766,6 @@ class DurableWorkflowRunner:
         revision_count: int = 0,
     ) -> AgentState:
         items = self._items_from_metadata(run)
-        # Cache the api_key per run so multi-step phases share the
-        # same orchestrator construction without re-decrypting.
-        if str(run.id) not in self._cached_api_key:
-            self._cached_api_key[str(run.id)] = await self._resolve_llm_api_key(
-                run.org_id, wf.config.llm_provider,
-            )
         return AgentState(
             workflow_config=wf.config,
             target_platforms=target_platforms,
@@ -758,7 +782,8 @@ class DurableWorkflowRunner:
         breaker = self.breaker
         org_id = str(run.org_id)
         kind = "platform"
-        plat_key = str(target_platform.kind)
+        # Platform.plugin_name is the registry key — NOT a .kind attr.
+        plat_key = target_platform.plugin_name
 
         async def _do():
             try:
@@ -767,31 +792,23 @@ class DurableWorkflowRunner:
                 raise PermanentError(f"no adapter for platform {plat_key}")
             # Pass OAuth credentials + per-account config so the adapter
             # can authenticate against the platform API.
-            try:
-                adapter = adapter_cls(
-                    credentials=getattr(target_platform, "credentials", None),
-                    config=getattr(target_platform, "config", None),
-                )
-            except TypeError:
-                adapter = adapter_cls()
-            # Append hashtag block after a blank line — same convention
-            # the inline path uses (PostPayload.content is the literal
-            # text the platform receives).
-            body_with_tags = draft.text
-            if draft.hashtags:
-                body_with_tags = (
-                    draft.text.rstrip()
-                    + "\n\n"
-                    + " ".join(h.value for h in draft.hashtags)
-                )
-            media_urls = [m.url for m in (draft.media or []) if getattr(m, "url", None)]
-            payload = PostPayload(
-                content=body_with_tags,
-                title=getattr(draft.blueprint_ref, "angle", "")[:120]
-                      if draft.blueprint_ref else "",
-                media_urls=media_urls,
+            adapter = adapter_cls(
+                credentials=getattr(target_platform, "credentials", None),
+                config=getattr(target_platform, "config", None) or {},
             )
-            return await adapter.publish(payload, account=target_platform)
+            # PostPayload uses ``text`` / ``hashtags`` / ``media`` — not
+            # ``content`` / ``title`` / ``media_urls`` (that was an
+            # earlier guess; the real shape lives in adapters/platforms/
+            # base.py). The hashtag list rides as a structured field so
+            # adapters that have platform-specific tagging conventions
+            # (Instagram caption block, X inline) can format correctly.
+            payload = PostPayload(
+                text=draft.text,
+                hashtags=list(draft.hashtags),
+                media=list(draft.media),
+            )
+            # SocialPlatform.publish(payload) — single positional arg.
+            return await adapter.publish(payload)
 
         with trace_span("publish",
                         **{"org.id": org_id,
@@ -818,23 +835,19 @@ class DurableWorkflowRunner:
                         platform=plat_key, status="error").inc()
                     raise
 
-        # Persist Post — record what we actually sent (incl. hashtags).
-        body_with_tags = draft.text
-        if draft.hashtags:
-            body_with_tags = (
-                draft.text.rstrip()
-                + "\n\n"
-                + " ".join(h.value for h in draft.hashtags)
-            )
-        post = Post.create(
-            org_id=run.org_id, workflow_id=wf.id,
-            platform_id=target_platform.id, run_id=run.id,
-            content=body_with_tags,
-            title=(getattr(draft.blueprint_ref, "angle", "") or "")[:120],
-            media_urls=[m.url for m in (draft.media or []) if getattr(m, "url", None)],
+        # Post.from_draft is the canonical constructor — copies
+        # text/hashtags/media off the draft and stamps a new PostId.
+        # (There is no ``Post.create`` despite what an older version
+        # of this file assumed.)
+        post = Post.from_draft(
+            org_id=run.org_id, workflow_id=wf.id, run_id=run.id,
+            platform_id=target_platform.id, draft=draft,
         )
-        post.status = PostStatus.PUBLISHED
-        post.external_url = getattr(result, "url", None)
+        # mark_published handles status + external_post_id +
+        # published_at in one go.
+        post.mark_published(
+            external_id=getattr(result, "external_post_id", "") or "",
+        )
         await self.post_repo.add(post)
         return post
 
