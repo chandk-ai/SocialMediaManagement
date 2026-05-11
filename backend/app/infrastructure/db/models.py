@@ -147,6 +147,12 @@ class WorkflowRunORM(Base):
     status: Mapped[str] = mapped_column(String, default="queued")
     revision_count: Mapped[int] = mapped_column(Integer, default=0)
     trace: Mapped[list] = mapped_column(JSONB, default=list)
+    # Phase state for the durable runner (selected_items, plan,
+    # drafts, critique decisions, post_ids). Added in migration 013
+    # — without it, every cross-phase write vanishes silently and
+    # the runner ends with "no posts produced" despite all 5 phase
+    # jobs succeeding.
+    metadata_: Mapped[dict] = mapped_column("metadata", JSONB, default=dict)
     error: Mapped[str | None] = mapped_column(Text)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

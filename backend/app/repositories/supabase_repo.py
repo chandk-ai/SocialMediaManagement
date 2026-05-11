@@ -167,6 +167,10 @@ def _run_to_domain(orm: WorkflowRunORM) -> WorkflowRun:
                for e in (orm.trace or [])],
         started_at=orm.started_at, finished_at=orm.finished_at,
         error=orm.error,
+        # ``metadata_`` on the ORM maps to the ``metadata`` column —
+        # we rename here back to the domain field. The durable runner
+        # reads/writes this every phase; dropping it = pipeline broken.
+        metadata=dict(orm.metadata_ or {}),
     )
 
 
@@ -177,6 +181,7 @@ def _run_to_orm(d: WorkflowRun) -> WorkflowRunORM:
         trace=[{"agent": e.agent, "event": e.event,
                 "occurred_at": e.occurred_at.isoformat(), **e.payload} for e in d.trace],
         error=d.error, started_at=d.started_at, finished_at=d.finished_at,
+        metadata_=dict(d.metadata or {}),
     )
 
 

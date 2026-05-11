@@ -14,6 +14,7 @@ from app.domain.value_objects.ids import OrgId, PlatformId, SourceId, WorkflowId
 from app.domain.value_objects.schedule import Schedule, ScheduleKind
 from app.domain.value_objects.targeting import TargetSelector
 from app.schemas.workflows import (
+    ScheduleIn,
     TargetSelectorIn,
     WorkflowConfigIn,
     WorkflowCreate,
@@ -124,12 +125,18 @@ async def create_workflow(
 
 
 class WorkflowUpdateBody(BaseModel):
+    # ``schedule`` MUST be the typed ScheduleIn (see import below) — not
+    # a raw dict — because Pydantic is what coerces the inbound
+    # ISO-string ``run_at`` into a real ``datetime``. The shim-based
+    # approach used previously left ``run_at`` as a string, which
+    # broke ``Schedule(run_at=...).isoformat()`` downstream with the
+    # exact ``'str' object has no attribute 'isoformat'`` we shipped.
     name: str | None = None
     description: str | None = None
     source_ids: list[UUID] | None = None
     platform_ids: list[UUID] | None = None
     config: WorkflowConfigIn | None = None
-    schedule: dict | None = None
+    schedule: ScheduleIn | None = None
     target_selector: TargetSelectorIn | None = None
 
 
@@ -143,16 +150,10 @@ async def update_workflow(
     if not user.role.can_edit():
         raise HTTPException(status_code=403, detail="Editor role required")
 
-    # Map any provided fields onto domain types
-    schedule = None
-    if body.schedule is not None:
-        class _S:                                                # tiny shim
-            kind = body.schedule.get("kind", "manual")
-            cron = body.schedule.get("cron")
-            interval_minutes = body.schedule.get("interval_minutes")
-            run_at = body.schedule.get("run_at")
-            timezone = body.schedule.get("timezone", "UTC")
-        schedule = _to_schedule(_S())
+    # Map any provided fields onto domain types. ``ScheduleIn`` has
+    # ``run_at: datetime`` so Pydantic has already parsed the inbound
+    # ISO string into a real datetime by the time we touch it here.
+    schedule = _to_schedule(body.schedule) if body.schedule is not None else None
 
     try:
         wf = await svc.update(
@@ -256,10 +257,21 @@ async def list_runs(
     user: Principal = Depends(current_user),
     svc: WorkflowService = Depends(get_workflow_service),
 ) -> list[dict]:
-    """Recent runs for a workflow, newest first, with their agent traces."""
+    """Recent runs for a workflow, newest first, with their agent traces.
+
+    Includes runs that haven't started a phase yet (``status='queued'``,
+    ``started_at=None``) — these are the runs that have just been
+    enqueued from the API but not yet claimed by a worker. Surfacing
+    them is what gives the workflow card immediate "Queued…" feedback
+    after a Run Now click."""
+    from datetime import datetime, timezone
     org_id = OrgId(UUID(user.org_id))
     runs = await svc.run_repo.list_for_workflow(org_id, WorkflowId(workflow_id))
-    runs = sorted(runs, key=lambda r: r.started_at, reverse=True)[:limit]
+    # Repo already returns ordered by created_at desc, which is
+    # always-non-null and matches the "newest first" intent. The
+    # repo doesn't return ``created_at`` on the domain entity, so
+    # don't try to re-sort here on a field that may be None.
+    runs = runs[:limit]
     return [{
         "id": str(r.id),
         "workflow_id": str(r.workflow_id),
@@ -267,7 +279,8 @@ async def list_runs(
         "directive": r.directive,
         "initiator": r.initiator,
         "revision_count": r.revision_count,
-        "started_at": r.started_at.isoformat(),
+        # Both timestamps can be None on queued/awaiting-review runs.
+        "started_at": r.started_at.isoformat() if r.started_at else None,
         "finished_at": r.finished_at.isoformat() if r.finished_at else None,
         "error": r.error,
         "trace": [
@@ -395,38 +408,84 @@ async def run_now(
         )
 
     if chosen == "durable":
+        from app.api.deps import get_durable_runner
+        from app.services.jobs.queue import DuplicateIdempotencyKey
         queue = get_job_queue()
         limiter = get_tenant_rate_limiter()
+        runner = get_durable_runner()
         if not await limiter.try_consume(user.org_id, cost=1.0):
             raise HTTPException(
                 status_code=429,
                 detail="tenant rate limit exceeded — try again in a few seconds",
             )
+
+        # Minute-bucketed idempotency: a fast double-click within the
+        # same minute returns the original job's run_id; a deliberate
+        # click 60s later creates a fresh run.
+        ik = f"start:{workflow_id}:{user.subject}:{int(_time.time() // 60)}"
+
+        # We create the run row FIRST so the workflow card sees it
+        # immediately (pre-fix: row was created lazily inside the
+        # worker, leaving a multi-second "did Run Now do anything?"
+        # gap). If the job enqueue then de-dupes (existing job from a
+        # prior click in the same minute), we look up its run_id and
+        # return THAT instead of leaving an orphan row.
+        try:
+            run = await runner.create_run_for_job(
+                org_id=user.org_id, workflow_id=str(workflow_id),
+                trigger_kind="manual", idempotency_key=ik,
+            )
+        except Exception as exc:                                     # noqa: BLE001
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
         try:
             job = await queue.enqueue(
                 "run.start", user.org_id,
+                # Pass the pre-created run_id so the worker's run.start
+                # handler skips create_run_for_job and goes straight to
+                # enqueueing run.select against the existing row.
                 {"workflow_id": str(workflow_id),
+                 "run_id": str(run.id),
                  "trigger_kind": "manual"},
-                # Minute-bucketed key so a fast double-click is de-duped,
-            # but a deliberate re-run a minute later still goes through.
-            # Principal exposes ``subject`` (Supabase JWT sub claim), not
-            # ``id`` — using subject here so different teammates can each
-            # trigger the same workflow in the same minute distinctly.
-            idempotency_key=f"start:{workflow_id}:{user.subject}:{int(_time.time() // 60)}",
+                run_id=run.id, idempotency_key=ik,
             )
+        except DuplicateIdempotencyKey as exc:
+            # Existing job for this minute-bucket — look up its
+            # run_id and return that one. The freshly-created run row
+            # is now orphaned; flag it FAILED with a clear reason so
+            # the runs list doesn't accumulate untouchable junk.
+            existing_job = await queue.get(exc.existing_job_id)
+            existing_run_id = existing_job.run_id if existing_job else None
+            try:
+                run.error = "superseded by concurrent click (same minute bucket)"
+                from app.domain.entities.workflow_run import RunStatus
+                run.transition(RunStatus.CANCELLED)
+                await runner.run_repo.update(run)
+            except Exception:                                        # noqa: BLE001
+                pass
+            return {
+                "mode": "durable",
+                "run_id": existing_run_id or str(run.id),
+                "job_id": exc.existing_job_id,
+                "status": "queued",
+                "scheduled_for": None,
+                "deduplicated": True,
+            }
         except Exception as exc:                                     # noqa: BLE001
             raise HTTPException(status_code=500,
                                  detail=str(exc)) from exc
+
         if audit is not None:
             await audit.record(
                 org_id=user.org_id, action="workflow.run.enqueued",
                 resource_type="workflow", resource_id=workflow_id,
-                after={"job_id": job.id, "mode": "durable"},
+                after={"job_id": job.id, "run_id": str(run.id),
+                        "mode": "durable"},
             )
         return {
             "mode": "durable",
-            "run_id": None, "job_id": job.id,
-            "status": job.status.value,
+            "run_id": str(run.id), "job_id": job.id,
+            "status": "queued",
             "scheduled_for": job.scheduled_for.isoformat(),
         }
 
