@@ -53,13 +53,9 @@ export function Logo({
     >
       <defs>
         {!monochrome && (
-          /* Emerald vertical gradient — wellness + positive-action.
-             Lighter at the top so the mark has lift; deeper at the
-             bottom for grounding. Values must stay in sync with
-             ``brand.from`` / ``brand.to`` in tailwind.config.ts. */
           <linearGradient id={gid} x1="0" y1="0" x2="0" y2="32" gradientUnits="userSpaceOnUse">
-            <stop offset="0" stopColor="#22C55E" />
-            <stop offset="1" stopColor="#15803D" />
+            <stop offset="0" stopColor="#5B8DEF" />
+            <stop offset="1" stopColor="#2D52CE" />
           </linearGradient>
         )}
       </defs>
