@@ -142,28 +142,25 @@ class SupabaseStorage:
         await asyncio.to_thread(_do)
 
     async def create_signed_upload_url(self, path: str) -> dict[str, str]:
-        """Generate a short-lived URL the frontend can PUT a file to,
-        bypassing our backend entirely. Used for large media uploads
-        where buffering the bytes through FastAPI (and through the
-        Vercel proxy in front of it) would exceed body-size limits.
+        """Generate a short-lived signed upload token. The frontend
+        calls ``supabase.storage.from(bucket).uploadToSignedUrl(path,
+        token, file)`` with what we return — supabase-js then handles
+        CORS, content-type negotiation, and (for files > ~6 MB) TUS
+        resumable upload chunking. We tried to hand-roll a raw PUT
+        against the embedded-token URL but Supabase's Storage server
+        doesn't accept the CORS preflight on that endpoint pattern;
+        going through supabase-js is the documented and supported way.
 
         Returns:
-            ``{signed_url, public_url, storage_path}`` —
-
-            * ``signed_url``  — URL to PUT the file bytes to. Includes
-              an embedded auth token in the path; valid for ~2 hours.
-            * ``public_url``  — the permanent post-upload URL the post
-              can reference. Matches what ``public_url(path)`` returns
-              and is valid once the PUT completes successfully.
-            * ``storage_path`` — the key inside the bucket. Caller
-              records it for housekeeping (delete on post deletion,
-              etc.).
-
-        Auth: we use the service-role key here, which has full write
-        access to the bucket. The signed URL it produces is bound to
-        the specific path — the frontend can't use it to write
-        elsewhere. The token in the URL is short-lived so a leaked
-        signed URL stops working before it can be exploited.
+          * ``token``        — opaque short-lived (~2 h) credential
+                              that authorizes a PUT to ``storage_path``.
+          * ``storage_path`` — the key inside the bucket where the file
+                              will live after upload.
+          * ``bucket``       — the bucket name (so the frontend doesn't
+                              hard-code it).
+          * ``public_url``   — the permanent URL the post can reference
+                              once the upload completes. Matches
+                              ``public_url(path)``.
         """
         base = self.settings.supabase.url.rstrip("/")
         service_key_raw = self.settings.supabase.service_role_key
@@ -190,27 +187,19 @@ class SupabaseStorage:
                 )
             data = r.json() or {}
 
-        # Supabase returns ``{url, token}`` (the ``url`` is already a
-        # full URL with the token embedded, so callers usually just
-        # need that — we expose both for flexibility / debugging).
-        # ``data["url"]`` looks like: /storage/v1/object/upload/sign/{bucket}/{path}?token=...
-        # — it may be relative. Resolve to absolute so the browser can
-        # PUT it without further work.
-        signed_path = data.get("url") or ""
-        if signed_path.startswith("/"):
-            signed_url = f"{base}{signed_path}"
-        elif signed_path.startswith("http"):
-            signed_url = signed_path
-        else:
-            # Fallback: construct the URL ourselves from the token
-            token = data.get("token") or ""
-            signed_url = (
-                f"{base}/storage/v1/object/upload/sign/"
-                f"{self.bucket}/{path}?token={token}"
-            )
+        token = data.get("token") or ""
+        if not token:
+            # Defensive: older Supabase versions may put the token
+            # inside the URL field as ``?token=…``. Extract it so the
+            # frontend always gets a plain token regardless of server
+            # version.
+            from urllib.parse import parse_qs, urlparse
+            qs = parse_qs(urlparse(data.get("url") or "").query)
+            token = (qs.get("token") or [""])[0]
 
         return {
-            "signed_url": signed_url,
-            "public_url": self.public_url(path),
+            "token": token,
             "storage_path": path,
+            "bucket": self.bucket,
+            "public_url": self.public_url(path),
         }

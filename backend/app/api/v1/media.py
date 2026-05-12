@@ -98,14 +98,22 @@ class SignedUploadIn(BaseModel):
 
 
 class SignedUploadOut(BaseModel):
-    signed_url: str = Field(
-        description="PUT the file body here; valid for ~2 hours.",
+    # The frontend feeds these three into supabase-js:
+    #   supabase.storage.from(bucket).uploadToSignedUrl(storage_path, token, file)
+    # supabase-js handles CORS, content-type, and TUS chunking. We
+    # deliberately do NOT return a pre-built PUT URL — going through
+    # supabase-js is the only path Supabase Storage's CORS rules
+    # actually allow from a browser. (We tried raw PUT against the
+    # embedded-token URL and hit CORS-preflight 404 from the server.)
+    bucket: str
+    storage_path: str
+    token: str = Field(
+        description="Short-lived (~2 h) upload token. Pass to "
+                    "supabase.storage.from(bucket).uploadToSignedUrl().",
     )
     public_url: str = Field(
-        description="The permanent public URL the post should reference "
-                    "after the PUT completes successfully.",
+        description="Permanent post-upload URL the Post should reference.",
     )
-    storage_path: str
     content_type: str
 
 
@@ -174,9 +182,10 @@ async def signed_upload(
         ) from exc
 
     return SignedUploadOut(
-        signed_url=result["signed_url"],
-        public_url=result["public_url"],
+        bucket=result["bucket"],
         storage_path=result["storage_path"],
+        token=result["token"],
+        public_url=result["public_url"],
         content_type=ct,
     )
 

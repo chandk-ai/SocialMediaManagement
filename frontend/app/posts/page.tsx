@@ -10,6 +10,7 @@ import { useApi, api, ApiError } from '@/lib/api/client';
 import type { Media, Post } from '@/lib/api/types';
 import { FileText, Check, Edit3, Trash2, Send, X, AlertTriangle, Plus, Image as ImageIcon, Upload, Download, Link2 } from 'lucide-react';
 import { useRef, useState } from 'react';
+import { getSupabase } from '@/lib/auth/supabase';
 import { mutate } from 'swr';
 import { formatDateTime } from '@/lib/utils';
 
@@ -268,43 +269,44 @@ function EditDialog({ post, swrKey, onClose }: {
     setActiveRow(null);
     setUploadErr(null);
     try {
-      // Signed-URL flow: ask the backend for a short-lived Supabase
-      // upload URL (tiny JSON request, passes through any proxy),
-      // then PUT the file DIRECTLY to Supabase. No file bytes ever
-      // traverse Vercel's proxy (4.5 MB cap) or our Render backend
-      // (memory cost). Works for files up to the bucket's 500 MB
-      // file_size_limit.
+      // Step 1: ask the backend for a short-lived Supabase upload
+      // token. The request body is tiny JSON (filename + mime) so
+      // it passes through the Vercel proxy fine — no body-size cap
+      // concerns. Backend returns the bucket name, the storage path,
+      // and a token that authorizes a PUT to that path.
       const signed = await api.post<{
-        signed_url: string;
-        public_url: string;
+        bucket: string;
         storage_path: string;
+        token: string;
+        public_url: string;
         content_type: string;
       }>('/media/signed-upload', {
         filename: file.name,
         content_type: file.type || 'application/octet-stream',
       });
 
-      // Direct PUT to Supabase. We send Content-Type explicitly so
-      // the Storage server records it correctly on the object — the
-      // bucket's mime allow-list checks this header. Match the value
-      // the backend already validated.
-      const putRes = await fetch(signed.signed_url, {
-        method: 'PUT',
-        body: file,
-        headers: {
-          'Content-Type': signed.content_type,
-          // Don't accidentally clobber an existing object at the
-          // same key — the path always includes a fresh UUID so
-          // collisions are essentially impossible, but defense in
-          // depth is cheap here.
-          'x-upsert': 'false',
-        },
-      });
-      if (!putRes.ok) {
-        const body = await putRes.text();
-        throw new Error(
-          `Direct upload to Supabase failed (${putRes.status}): ${body.slice(0, 200)}`,
-        );
+      // Step 2: hand the (path, token, file) to supabase-js's
+      // uploadToSignedUrl. The official client handles:
+      //   * CORS preflight against the bucket's storage host
+      //   * Correct Content-Type negotiation
+      //   * TUS resumable upload for files > ~6 MB (which is what
+      //     killed our earlier hand-rolled fetch PUT — Supabase
+      //     Storage's signed-URL PUT endpoint doesn't accept CORS
+      //     preflight for the multipart body shape, but its
+      //     ``uploadToSignedUrl`` client method goes through a
+      //     CORS-allowed path).
+      //
+      // The file bytes still go browser → Supabase Storage directly:
+      // they never traverse Vercel's proxy or our Render backend.
+      const sb = getSupabase();
+      const { error: upErr } = await sb.storage
+        .from(signed.bucket)
+        .uploadToSignedUrl(signed.storage_path, signed.token, file, {
+          contentType: signed.content_type,
+          upsert: false,
+        });
+      if (upErr) {
+        throw new Error(`Supabase upload failed: ${upErr.message}`);
       }
 
       const kind: 'image' | 'video' =

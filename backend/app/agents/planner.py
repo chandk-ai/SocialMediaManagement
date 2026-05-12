@@ -5,9 +5,48 @@ import json
 from dataclasses import asdict
 
 from app.adapters.llm.base import LLMRequest
-from app.domain.value_objects.content import ContentPlan, Hashtag, PostBlueprint
+from app.domain.value_objects.content import (
+    ContentPlan, Hashtag, MediaAsset, MediaKind, PostBlueprint,
+)
 
 from .base import Agent, AgentState
+
+
+# ── Per-platform media-routing table ────────────────────────────────────
+# What kind of media each platform actually accepts, plus how many items
+# its publisher will use. Order in ``prefer`` matters: ``video`` first
+# means "pick a video if one's available, otherwise fall back to image".
+# ``max_items`` is the cap our publisher honors today — most adapters
+# only use ``media[0]`` so this is 1 nearly everywhere. When we ship
+# real carousel / album support, bump these and the executor will
+# automatically thread more items through.
+#
+# Plugins NOT listed here get the default: ``prefer=("image", "video"),
+# max_items=1``. That's a safe fallback for any new text-+-one-attachment
+# platform.
+_PLATFORM_MEDIA_RULES: dict[str, dict] = {
+    # Reels-style platforms — video-first, must have media.
+    "instagram":  {"prefer": ("video", "image"), "max_items": 1, "requires": True},
+    "tiktok":     {"prefer": ("video",),         "max_items": 1, "requires": True},
+    "youtube":    {"prefer": ("video",),         "max_items": 1, "requires": True},
+    # Image-first platforms.
+    "pinterest":  {"prefer": ("image", "video"), "max_items": 1, "requires": True},
+    # Text-with-optional-media platforms.
+    "linkedin":   {"prefer": ("image", "video"), "max_items": 1, "requires": False},
+    "facebook":   {"prefer": ("image", "video"), "max_items": 1, "requires": False},
+    "twitter":    {"prefer": ("image", "video"), "max_items": 1, "requires": False},
+    "threads":    {"prefer": ("image", "video"), "max_items": 1, "requires": False},
+    "bluesky":    {"prefer": ("image", "video"), "max_items": 1, "requires": False},
+    "mastodon":   {"prefer": ("image", "video"), "max_items": 1, "requires": False},
+    "reddit":     {"prefer": ("image", "video"), "max_items": 1, "requires": False},
+    "tumblr":     {"prefer": ("image", "video"), "max_items": 1, "requires": False},
+    # Text-only (or rich-document) platforms — no media even if available.
+    "telegram":   {"prefer": ("image", "video"), "max_items": 1, "requires": False},
+    "discord":    {"prefer": ("image", "video"), "max_items": 1, "requires": False},
+    "slack":      {"prefer": ("image", "video"), "max_items": 1, "requires": False},
+    "medium":     {"prefer": ("image",),         "max_items": 1, "requires": False},
+}
+_DEFAULT_MEDIA_RULE = {"prefer": ("image", "video"), "max_items": 1, "requires": False}
 
 PLANNER_SYSTEM = """You are the Planner agent in a social-media content pipeline.
 You receive (a) reference source material and (b) a list of target platforms.
@@ -80,26 +119,51 @@ class PlannerAgent(Agent):
 
 
 def _attach_source_media(plan: ContentPlan, source_items) -> ContentPlan:
-    """Propagate the first source item's media onto every blueprint.
+    """Pick the right media for each platform out of the full pool of
+    media across all selected source items.
 
-    Why "first source item only": the Planner consolidates multiple
-    sources into a single conceptual post — copying every source's
-    media risks producing a 20-image carousel from a 5-item news feed.
-    The first item is the highest-ranked by selection strategy
-    (freshness / relevance / etc.), so its hero image is the right
-    one to use.
+    The old behavior was "first source item's media wins, copied to
+    every blueprint" — which silently discarded other items' media and
+    didn't care whether the chosen asset was the right shape for the
+    platform (square image to a Reels-only platform, etc.).
 
-    Per-platform fan-out happens later in the Tailor agent, which
-    keeps the same attached_media for each variant.
+    The new behavior:
+
+      1. **Pool across sources, preserve order.** Walk every source
+         item in selection-rank order; collect each item's media into
+         a single flat list. De-dupe by URL so the same Notion image
+         attached to two pages doesn't appear twice. Earlier-ranked
+         items contribute first, so a hero image from the top-ranked
+         item still beats a thumbnail from item #3.
+
+      2. **Per-platform selection.** For each blueprint, consult
+         ``_PLATFORM_MEDIA_RULES[platform_name]`` to learn (a) what
+         kinds this platform prefers and (b) how many items it can
+         consume. Pick from the pool accordingly. A platform that
+         requires video (TikTok) gets only videos; a platform that
+         accepts either (LinkedIn) gets whatever ranks first.
+
+      3. **Fail-soft.** If the pool is empty OR no item matches the
+         platform's required kinds, ``attached_media`` is left empty
+         and the Executor falls back to media-generation (if
+         configured) or text-only.
+
+    This is the right contract for workflows with multiple sources
+    feeding different content types — a YouTube source contributing
+    videos and a Notion source contributing images can publish a
+    Reels post (gets the video) AND a LinkedIn post (gets the image)
+    from the same run.
     """
     if not source_items:
         return plan
-    hero = source_items[0]
-    media = list(getattr(hero, "media", ()) or ())
-    if not media:
+    pool = _build_media_pool(source_items)
+    if not pool:
         return plan
-    new_bps = [
-        PostBlueprint(
+
+    new_bps = []
+    for bp in plan.blueprints:
+        chosen = _select_media_for_platform(pool, bp.platform_name)
+        new_bps.append(PostBlueprint(
             platform_name=bp.platform_name,
             angle=bp.angle, hook=bp.hook,
             key_messages=list(bp.key_messages),
@@ -109,10 +173,8 @@ def _attach_source_media(plan: ContentPlan, source_items) -> ContentPlan:
             media_prompt=bp.media_prompt,
             media_kind=bp.media_kind,
             notes=bp.notes,
-            attached_media=media,
-        )
-        for bp in plan.blueprints
-    ]
+            attached_media=chosen,
+        ))
     return ContentPlan(
         blueprints=new_bps,
         rationale=plan.rationale,
@@ -149,6 +211,57 @@ def _parse_plan(raw: str, fallback_platforms: list[str]) -> ContentPlan:
             rationale="LLM returned non-JSON; used fallback",
             source_summary="",
         )
+
+
+def _build_media_pool(source_items) -> list[MediaAsset]:
+    """Flatten every selected source item's ``media`` tuple into one
+    ordered list, de-duping by URL. Earlier-ranked items contribute
+    first so that highest-relevance media wins ties downstream."""
+    pool: list[MediaAsset] = []
+    seen_urls: set[str] = set()
+    for item in source_items:
+        for m in getattr(item, "media", ()) or ():
+            if not m or not getattr(m, "url", None):
+                continue
+            if m.url in seen_urls:
+                continue
+            seen_urls.add(m.url)
+            pool.append(m)
+    return pool
+
+
+def _select_media_for_platform(
+    pool: list[MediaAsset], platform_name: str,
+) -> list[MediaAsset]:
+    """Pick the best subset of media from the pool for a given platform.
+
+    Walks the platform's preferred kinds in order (e.g. video-first
+    for Reels-style platforms), takes up to ``max_items`` matching
+    assets in pool order. Returns ``[]`` if nothing matches — callers
+    must be prepared for that and decide whether to fall back to
+    media-generation, post text-only, or skip the platform entirely.
+    """
+    rule = _PLATFORM_MEDIA_RULES.get(platform_name, _DEFAULT_MEDIA_RULE)
+    prefer_kinds = rule["prefer"]
+    max_items = int(rule["max_items"])
+
+    out: list[MediaAsset] = []
+    for kind_name in prefer_kinds:
+        target_kind = MediaKind(kind_name)
+        for m in pool:
+            if m in out:
+                continue
+            if getattr(m, "kind", None) is target_kind:
+                out.append(m)
+                if len(out) >= max_items:
+                    return out
+        if out:
+            # We collected at least one of the preferred kind — don't
+            # mix kinds in the same post. Stop here rather than
+            # padding with a less-preferred kind that the platform
+            # adapter may not handle gracefully.
+            return out
+    return out
 
 
 def _fallback_blueprints(platforms: list[str], raw: str) -> list[PostBlueprint]:

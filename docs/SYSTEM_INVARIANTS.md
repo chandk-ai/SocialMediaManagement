@@ -103,10 +103,25 @@ prose belongs in module docstrings; this file is a checklist.
   endpoint, and the `/media/import` (yt-dlp) endpoint all call into it.
   * Source plugins (Notion, Drive, RSS, web_*, youtube) populate
     `SourceItem.media` via this service.
-  * The Planner copies `source_items[0].media` to every
-    `PostBlueprint.attached_media`.
-  * The Executor uses `attached_media` ahead of any media-generation
-    plugin — source media wins.
+
+* **The Planner pools media across ALL selected source items, then
+  picks per-platform** via `_PLATFORM_MEDIA_RULES`.
+  * Pool: every selected source item's media is flattened into one
+    ordered list, de-duped by URL. Earlier-ranked items contribute
+    first so the highest-relevance media wins.
+  * Per-platform selection respects each platform's `prefer` tuple
+    (video-first for Reels/TikTok, image-first for Pinterest, either
+    for LinkedIn/X/FB) and `max_items` cap.
+  * If no media in the pool matches a platform's preferred kinds,
+    `attached_media` is left empty and the Executor falls back to
+    media-generation OR text-only — never crashes the run.
+  * Adding a new platform plugin: add an entry to
+    `_PLATFORM_MEDIA_RULES` in `planner.py`. Missing entries get
+    `_DEFAULT_MEDIA_RULE` (image-first, max 1).
+
+* **The Executor uses `attached_media` ahead of any media-generation
+  plugin** — source media wins. AI-generated media is the last
+  fallback, not the default.
 
 * **The `smms-media` Supabase bucket is `public=true`** with
   `file_size_limit = 524288000` (500 MB) and a closed
@@ -119,14 +134,22 @@ prose belongs in module docstrings; this file is a checklist.
     key for content-type varies by version and silently dropping it
     causes Supabase to default to `text/plain` and reject.
 
-* **Frontend file uploads use the signed-URL path** (`POST
-  /media/signed-upload` → direct PUT to Supabase). This bypasses
-  both the Vercel proxy (4.5 MB cap, fundamentally broken for
-  binary multipart) AND the Render backend's memory. The buffered
-  `POST /media/upload` route still exists for small images and
-  legacy callers but **must not** be used from the frontend file
-  picker. Direct-PUT URL is bound to a single bucket path with a
-  ~2-hour TTL token — leaks expire harmlessly.
+* **Frontend file uploads use the supabase-js signed-token flow.**
+  Backend `POST /media/signed-upload` returns `{bucket, storage_path,
+  token, public_url, content_type}`. Frontend calls
+  ``supabase.storage.from(bucket).uploadToSignedUrl(storage_path,
+  token, file, { contentType, upsert: false })``.
+  * **Do NOT hand-roll a `fetch('PUT', ...)` against the signed URL.**
+    Supabase Storage's signed-URL PUT endpoint doesn't accept CORS
+    preflight from a browser. (May 12 2026 incident — we tried twice.)
+    Only the supabase-js client's `uploadToSignedUrl` method goes
+    through the CORS-allowed code path; it also auto-falls-back to
+    TUS resumable upload for files >6 MB.
+  * The bytes never touch Vercel's proxy or our Render backend.
+  * The buffered `POST /media/upload` route still exists for tiny
+    images and server-side callers (source plugins, yt-dlp imports
+    through MediaImportService) but **must not** be used from the
+    frontend file picker.
 
 * **`NEXT_PUBLIC_*` env vars are inlined at build time, not
   runtime.** Setting them in Vercel doesn't take effect until the
