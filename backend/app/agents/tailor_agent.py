@@ -194,6 +194,13 @@ class TailorAgent:
                 media_prompt=bp.media_prompt,
                 media_kind=bp.media_kind,
                 notes=new_notes,
+                # Preserve source-attached media verbatim across the
+                # Tailor pass — we refine text/hashtags per platform,
+                # but the user's actual asset (Notion image / Drive
+                # video / RSS hero) must not be regenerated. If a
+                # future revision wants per-platform crops, it can
+                # transform list(bp.attached_media) here.
+                attached_media=list(bp.attached_media),
             ))
 
         new_plan = ContentPlan(

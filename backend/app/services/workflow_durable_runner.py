@@ -83,6 +83,22 @@ def _plan_from_dict(d: dict[str, Any]) -> ContentPlan:
     )
 
 
+def _media_to_dict(m: MediaAsset) -> dict[str, Any]:
+    return {
+        "url": m.url,
+        "kind": m.kind.value if m.kind else None,
+        "alt_text": getattr(m, "alt_text", None),
+    }
+
+
+def _media_from_dict(m: dict[str, Any]) -> MediaAsset:
+    return MediaAsset(
+        url=m.get("url", ""),
+        kind=MediaKind(m["kind"]) if m.get("kind") else MediaKind.IMAGE,
+        alt_text=m.get("alt_text"),
+    )
+
+
 def _bp_to_dict(bp: PostBlueprint) -> dict[str, Any]:
     return {
         "platform_name": bp.platform_name,
@@ -93,6 +109,11 @@ def _bp_to_dict(bp: PostBlueprint) -> dict[str, Any]:
         "media_prompt": bp.media_prompt,
         "media_kind": bp.media_kind.value if bp.media_kind else None,
         "notes": bp.notes,
+        # New in May 2026 — source-attached media that bypasses the
+        # media-generation plugin. Persisted alongside other blueprint
+        # fields so a phase retry replays the same media instead of
+        # regenerating from media_prompt.
+        "attached_media": [_media_to_dict(m) for m in bp.attached_media],
     }
 
 
@@ -107,6 +128,11 @@ def _bp_from_dict(d: dict[str, Any]) -> PostBlueprint:
         media_prompt=d.get("media_prompt"),
         media_kind=MediaKind(d["media_kind"]) if d.get("media_kind") else None,
         notes=d.get("notes"),
+        attached_media=[
+            _media_from_dict(m)
+            for m in (d.get("attached_media") or [])
+            if m.get("url")
+        ],
     )
 
 
@@ -428,6 +454,11 @@ class DurableWorkflowRunner:
                                                    "reason": "no-chosen"})
 
         # Persist chosen items into metadata for downstream phases.
+        # Including ``media`` here is what lets the Planner / Executor
+        # see the source's attachments after the selection phase ends
+        # (selection serializes items to JSON, downstream phases
+        # deserialize from JSON only — so any attribute not stored
+        # here would silently vanish).
         run.metadata["selected_items"] = [
             {
                 "external_id": it.external_id,
@@ -437,6 +468,7 @@ class DurableWorkflowRunner:
                 "metadata": it.metadata,
                 "url": getattr(it, "url", None),
                 "published_at": it.published_at.isoformat() if it.published_at else None,
+                "media": [_media_to_dict(m) for m in (it.media or ())],
             }
             for it in result.chosen
         ]
@@ -794,11 +826,15 @@ class DurableWorkflowRunner:
                     published = datetime.fromisoformat(d["published_at"])
                 except Exception:                                    # noqa: BLE001
                     published = None
+            media = tuple(
+                _media_from_dict(m) for m in (d.get("media") or []) if m.get("url")
+            )
             out.append(SourceItem(
                 external_id=d["external_id"], title=d["title"],
                 body=d.get("body") or "",
                 metadata=d.get("metadata") or {},
                 published_at=published,
+                media=media,
             ))
         return out
 

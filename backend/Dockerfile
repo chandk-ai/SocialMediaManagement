@@ -2,9 +2,10 @@ FROM python:3.11-slim AS base
 ENV PYTHONUNBUFFERED=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 WORKDIR /app
 
-# System deps for cryptography / lxml
+# System deps for cryptography / lxml + ffmpeg (yt-dlp uses it to merge
+# separated video+audio streams into a single MP4 that platforms accept).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential libffi-dev libssl-dev \
+    build-essential libffi-dev libssl-dev ffmpeg \
  && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml /app/

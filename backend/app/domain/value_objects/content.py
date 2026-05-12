@@ -52,6 +52,11 @@ class PostBlueprint:
     media_prompt: str | None = None
     media_kind: MediaKind | None = None
     notes: str | None = None     # planner reasoning, useful in audit
+    # Media already provided by the source (Notion image block, Drive
+    # file, RSS enclosure, …). When present the Executor uses these
+    # directly and SKIPS the media-generation plugin — we don't want to
+    # synthesize an AI image when the user attached a real one.
+    attached_media: list[MediaAsset] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)

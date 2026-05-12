@@ -16,7 +16,15 @@ from bs4 import BeautifulSoup
 
 from app.core.logging import get_logger
 from app.domain.entities.source import SourceItem
+from app.domain.value_objects.content import MediaAsset, MediaKind
 from app.plugins.registry import register_plugin
+from app.services.media_import import MediaImportError, MediaImportService
+
+# Defer the helper module so the crawler keeps working in stripped-down
+# deployments that excluded it. We reach for one heuristic — extract
+# og:image / inline imgs — exactly mirroring web_scraper.py to keep
+# behaviour consistent across the two crawler-style sources.
+from .web_scraper import _looks_too_small  # noqa: PLC2701  (private re-use)
 
 from .base import ContentSource, SourceConnectionError
 
@@ -92,12 +100,24 @@ class WebCrawlerSource(ContentSource):
                 soup = BeautifulSoup(r.text, "html.parser")
                 node = soup.select_one(selector) or soup.body or soup
                 title = (soup.title.string if soup.title else url).strip()
+
+                media: tuple[MediaAsset, ...] = ()
+                try:
+                    media = await _extract_page_media(
+                        soup, base_url=url,
+                        org_id=str(self.config.get("__org_id__") or "shared"),
+                    )
+                except Exception as exc:                              # noqa: BLE001
+                    log.warning("web_crawler_media_extract_failed",
+                                url=url, error=str(exc))
+
                 yield SourceItem(
                     external_id=url,
                     title=title,
                     body=" ".join(node.get_text(separator=" ").split()),
                     url=url,
                     published_at=datetime.utcnow(),
+                    media=media,
                     metadata={"depth": depth, "status": r.status_code},
                 )
 
@@ -112,3 +132,64 @@ class WebCrawlerSource(ContentSource):
                         continue
                     if nxt not in seen:
                         queue.append((nxt, depth + 1))
+
+
+# ── media extraction (shared with web_scraper) ────────────────────────────
+_MAX_MEDIA_PER_PAGE = 2
+
+
+async def _extract_page_media(
+    soup: BeautifulSoup, *, base_url: str, org_id: str,
+) -> tuple[MediaAsset, ...]:
+    """Identical priority order to web_scraper._extract_page_media:
+    og:image → twitter:image → first substantial inline ``<img>``.
+    Kept separate (rather than importing the scraper's bound method)
+    because the crawler runs on dozens of pages per fetch and each
+    page wants its own org-scoped storage path; the helper is small
+    enough to duplicate."""
+    candidates: list[str] = []
+
+    for tag in soup.find_all("meta", attrs={"property": "og:image"}):
+        content = (tag.get("content") or "").strip()
+        if content:
+            candidates.append(urljoin(base_url, content))
+
+    for tag in soup.find_all("meta", attrs={"name": "twitter:image"}):
+        content = (tag.get("content") or "").strip()
+        if content:
+            candidates.append(urljoin(base_url, content))
+
+    for img in soup.find_all("img"):
+        src = (img.get("src") or "").strip()
+        if not src or src.startswith("data:"):
+            continue
+        if _looks_too_small(img):
+            continue
+        candidates.append(urljoin(base_url, src))
+
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for url in candidates:
+        if not url.startswith(("http://", "https://")):
+            continue
+        if url in seen:
+            continue
+        seen.add(url)
+        deduped.append(url)
+        if len(deduped) >= _MAX_MEDIA_PER_PAGE:
+            break
+
+    if not deduped:
+        return ()
+
+    importer = MediaImportService()
+    assets: list[MediaAsset] = []
+    for url in deduped:
+        try:
+            result = await importer.import_url(
+                org_id=org_id, url=url, filename_hint="web-crawler-image",
+            )
+            assets.append(MediaAsset(url=result.url, kind=MediaKind.IMAGE))
+        except MediaImportError as exc:
+            log.info("web_crawler_media_skipped", url=url, error=str(exc))
+    return tuple(assets)

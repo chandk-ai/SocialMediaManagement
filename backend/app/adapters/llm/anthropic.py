@@ -59,12 +59,27 @@ class AnthropicProvider(LLMProvider):
             raise MissingLLMCredentialError(
                 "anthropic", env_var="LLM_ANTHROPIC_API_KEY",
             )
+        # Claude's multimodal input is an array of content blocks under
+        # the user message. We append image blocks BEFORE the text so
+        # the model sees the image first (Anthropic's recommended order
+        # for vision-heavy prompts — text-after gives the model context
+        # about what to look for).
+        content_blocks: list[dict[str, Any]] = []
+        for img_url in req.image_urls or ():
+            if not img_url:
+                continue
+            content_blocks.append({
+                "type": "image",
+                "source": {"type": "url", "url": img_url},
+            })
+        content_blocks.append({"type": "text", "text": req.prompt})
+
         msg = await self._client.messages.create(
             model=model,
             max_tokens=req.max_tokens,
             temperature=req.temperature,
             system=req.system or "",
-            messages=[{"role": "user", "content": req.prompt}],
+            messages=[{"role": "user", "content": content_blocks}],
             stop_sequences=req.stop or [],
         )
         text = "".join(b.text for b in msg.content if hasattr(b, "text"))

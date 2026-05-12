@@ -80,6 +80,21 @@ class _ModelNotFound(Exception):
         super().__init__(f"model not found: {model}")
 
 
+def _guess_image_mime(url: str) -> str:
+    """Cheap content-type guess for Gemini ``file_data.mime_type``.
+    Gemini requires a mime; passing the wrong one usually still works
+    (their server re-sniffs) but explicit is better. Default to JPEG
+    for unknown — that's what most CDN-hosted social images are."""
+    u = url.split("?", 1)[0].lower()
+    if u.endswith(".png"):
+        return "image/png"
+    if u.endswith(".webp"):
+        return "image/webp"
+    if u.endswith(".gif"):
+        return "image/gif"
+    return "image/jpeg"
+
+
 def _scrub_key(text: str, api_key: str) -> str:
     """Mask the API key anywhere it might appear in a log line / error."""
     if not api_key or not text:
@@ -163,8 +178,26 @@ class GeminiProvider(LLMProvider):
             "x-goog-api-key": self.api_key,
             "Content-Type": "application/json",
         }
+        # Gemini multimodal: each ``inline_data`` part can carry a
+        # base64-encoded image, OR we can reference a public URL via
+        # ``file_data.file_uri`` (which Gemini fetches server-side —
+        # same trust boundary as Meta's image_url fetch).
+        # We use file_data here so we don't have to base64-encode
+        # potentially-large images in the request body.
+        parts: list[dict[str, Any]] = []
+        for img_url in req.image_urls or ():
+            if not img_url:
+                continue
+            parts.append({
+                "file_data": {
+                    "mime_type": _guess_image_mime(img_url),
+                    "file_uri": img_url,
+                },
+            })
+        parts.append({"text": req.prompt})
+
         body: dict[str, Any] = {
-            "contents": [{"role": "user", "parts": [{"text": req.prompt}]}],
+            "contents": [{"role": "user", "parts": parts}],
             "generationConfig": {
                 "temperature": req.temperature,
                 "maxOutputTokens": req.max_tokens,

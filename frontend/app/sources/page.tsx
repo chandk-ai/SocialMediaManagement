@@ -29,6 +29,27 @@ import {
 } from 'lucide-react';
 import { formatDateTime } from '@/lib/utils';
 
+/**
+ * Plugin names whose ``fetch()`` populates ``SourceItem.media`` — kept
+ * in sync with the backend source adapters as of May 2026. Used to show
+ * a small "yields media" badge so users can pick sources that produce
+ * IG / Pinterest-eligible posts at a glance. Drift from backend reality
+ * is acceptable for this hint — worst case the badge appears or
+ * disappears one deploy late.
+ */
+const SOURCES_THAT_YIELD_MEDIA: ReadonlySet<string> = new Set([
+  'notion',
+  'google_drive',
+  'rss',
+  'web_scraper',
+  'web_crawler',
+  'youtube',
+]);
+
+function pluginYieldsMedia(name: string): boolean {
+  return SOURCES_THAT_YIELD_MEDIA.has(name);
+}
+
 const PLUGIN_HINTS: Record<string, string> = {
   rss: "Public RSS or Atom feed URL — try a blog like https://news.ycombinator.com/rss",
   web_scraper: "Single web page — extracts the main article body.",
@@ -453,6 +474,18 @@ function SourceTile({ source, pluginInfo, onEdit }: {
           <CardTitle className="truncate">{source.display_name}</CardTitle>
           <CardDescription>
             {pluginInfo?.display_name ?? source.plugin_name}
+            {pluginYieldsMedia(source.plugin_name) && (
+              <span
+                title={
+                  'This source produces media (images/video) that flow ' +
+                  'into Posts automatically — Instagram and Pinterest can ' +
+                  'publish them without a separate upload.'
+                }
+                className="ml-2 inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700 align-middle"
+              >
+                yields media
+              </span>
+            )}
             {(usage?.count ?? 0) > 0 && (
               <> · used by {usage!.count} workflow{usage!.count !== 1 && 's'}</>
             )}

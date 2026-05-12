@@ -47,6 +47,13 @@ class LLMRequest:
     stop: list[str] | None = None
     response_format: str | None = None     # e.g. "json"
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Public HTTPS URLs of image attachments. When set, vision-capable
+    # providers (Anthropic Claude, Gemini, OpenAI gpt-4o) embed these
+    # as multimodal content alongside the prompt so the model can
+    # actually *see* what the source contains — captions can then
+    # describe the image rather than hallucinating from text alone.
+    # Providers that don't support vision quietly ignore this field.
+    image_urls: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

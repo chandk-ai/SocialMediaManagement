@@ -4,6 +4,7 @@ from . import (
     auth, platforms, sources, workflows, posts, plugins, health,
     triggers, reviews, webhooks, llm_keys, llm_usage, audit, team,
     compliance, selection, source_items, jobs, engagement, knowledge, marketplace,
+    media,
     campaigns, experiments, approvals, recycling,
     localization, hashtags, performance, privacy,
 )
@@ -30,6 +31,7 @@ api_router.include_router(jobs.router, tags=["jobs"])
 api_router.include_router(engagement.router, tags=["engagement"])
 api_router.include_router(knowledge.router, tags=["knowledge"])
 api_router.include_router(marketplace.router, tags=["marketplace"])
+api_router.include_router(media.router, prefix="/media", tags=["media"])
 
 # Advanced feature routers
 api_router.include_router(campaigns.router, prefix="/campaigns", tags=["campaigns"])

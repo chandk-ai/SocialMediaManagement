@@ -20,7 +20,13 @@ async def load_items(
     out: list[SourceItem] = []
     for src in sources:
         entry = registry.get(PluginKind.SOURCE, src.plugin_name)
-        adapter: ContentSource = entry.cls(config=src.config)
+        # Inject the owning org_id into the adapter's config under a
+        # reserved ``__org_id__`` key. Source plugins that need to call
+        # MediaImportService (Notion, Drive, RSS, …) require this for
+        # org-scoped storage paths. Reserved-name convention keeps user-
+        # configurable fields cleanly separated from runtime context.
+        plugin_config = {**(src.config or {}), "__org_id__": str(src.org_id)}
+        adapter: ContentSource = entry.cls(config=plugin_config)
         try:
             await adapter.connect()
             count = 0

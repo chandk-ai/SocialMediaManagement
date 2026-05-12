@@ -30,6 +30,12 @@ dependencies = [
   "anthropic>=0.34 ; python_version >= '3.11'",
   "openai>=1.40 ; python_version >= '3.11'",
   "langgraph>=0.2 ; python_version >= '3.11'",
+  # python-multipart powers FastAPI's UploadFile machinery, used by
+  # the /media/upload endpoint. FastAPI doesn't pull it in by itself.
+  "python-multipart>=0.0.9",
+  # yt-dlp powers /media/import (YouTube / TikTok / Vimeo → mp4).
+  # ffmpeg must also be present in the container PATH — see Dockerfile.
+  "yt-dlp>=2024.07.01",
 ]
 
 [project.optional-dependencies]

@@ -69,8 +69,55 @@ class PlannerAgent(Agent):
             response_format="json", temperature=0.5, max_tokens=1500,
         ))
         plan = _parse_plan(rsp.text, fallback_platforms=state.target_platforms)
+        # If the source items already carry media (Notion image block,
+        # Drive image file, RSS enclosure, …), copy it onto every
+        # blueprint as ``attached_media``. The Executor will see those
+        # and skip the media-generation plugin entirely — using the
+        # real source asset rather than synthesizing one.
+        plan = _attach_source_media(plan, state.source_items)
         state.log(self.name, "plan_built", blueprints=len(plan.blueprints), tokens=asdict(rsp.usage))
         return state.merge(plan=plan)
+
+
+def _attach_source_media(plan: ContentPlan, source_items) -> ContentPlan:
+    """Propagate the first source item's media onto every blueprint.
+
+    Why "first source item only": the Planner consolidates multiple
+    sources into a single conceptual post — copying every source's
+    media risks producing a 20-image carousel from a 5-item news feed.
+    The first item is the highest-ranked by selection strategy
+    (freshness / relevance / etc.), so its hero image is the right
+    one to use.
+
+    Per-platform fan-out happens later in the Tailor agent, which
+    keeps the same attached_media for each variant.
+    """
+    if not source_items:
+        return plan
+    hero = source_items[0]
+    media = list(getattr(hero, "media", ()) or ())
+    if not media:
+        return plan
+    new_bps = [
+        PostBlueprint(
+            platform_name=bp.platform_name,
+            angle=bp.angle, hook=bp.hook,
+            key_messages=list(bp.key_messages),
+            cta=bp.cta,
+            hashtags=list(bp.hashtags),
+            suggested_media=bp.suggested_media,
+            media_prompt=bp.media_prompt,
+            media_kind=bp.media_kind,
+            notes=bp.notes,
+            attached_media=media,
+        )
+        for bp in plan.blueprints
+    ]
+    return ContentPlan(
+        blueprints=new_bps,
+        rationale=plan.rationale,
+        source_summary=plan.source_summary,
+    )
 
 
 def _parse_plan(raw: str, fallback_platforms: list[str]) -> ContentPlan:

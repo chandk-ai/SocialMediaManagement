@@ -64,9 +64,22 @@ class ExecutorAgent(Agent):
             system = EXECUTOR_SYSTEM + voice_block + _custom_block(
                 state.workflow_config.custom_system_prompt,
             )
+            # Multimodal context: when the blueprint already has
+            # source-attached IMAGES, pass them to the LLM so the
+            # generated caption can actually reference what's in the
+            # picture — not hallucinate from text alone. Videos are
+            # excluded (most vision models can't process them, and
+            # frame extraction is out of scope here). Provider adapters
+            # that don't support vision will quietly ignore this field.
+            image_urls = tuple(
+                m.url for m in getattr(bp, "attached_media", None) or []
+                if m and m.url and getattr(m, "kind", None) is not None
+                and m.kind.value == "image"
+            )
             rsp = await self.llm.complete(LLMRequest(
                 prompt=prompt, system=system,
                 temperature=0.7, max_tokens=600,
+                image_urls=image_urls,
             ))
             text = rsp.text.strip()
             media = await _maybe_generate_media(bp, state)
@@ -100,12 +113,35 @@ PLATFORMS_REQUIRING_MEDIA = {"instagram", "tiktok", "pinterest", "youtube"}
 
 
 async def _maybe_generate_media(bp, state) -> list:
-    """If the platform requires media and the Planner provided a media_prompt
-    (or the platform implicitly demands it), invoke the configured media
-    generator. Falls back to the mock generator so dev / tests still pass."""
+    """Decide what to attach to a draft's media list. Priority order:
+
+      1. **attached_media** — real media the Planner copied off
+         ``SourceItem.media`` (Notion image block, Drive file, RSS
+         enclosure, etc.). When this is non-empty we use the actual
+         source asset and skip generation entirely. This is the
+         strictly correct behaviour for "publish what's in my Notion
+         page", not "publish an AI-imagined image of what my Notion
+         page describes".
+      2. **suggested_media** — a one-off asset the Planner conjured
+         (rarely used).
+      3. **media_prompt** — invoke the configured media-generation
+         plugin (DALL-E, etc.).
+      4. **Implicit demand** — platform needs media but the Planner
+         didn't ask for any; synthesize from the hook as a last resort.
+
+    Returns an empty list when no media is needed AND none of the above
+    applies — caller (executor) leaves ``DraftPost.media`` empty so
+    text-only platforms publish text-only posts.
+    """
     from app.adapters.media.base import MediaBrief, MediaGenerator
     from app.domain.value_objects.content import MediaKind
     from app.plugins.registry import PluginKind, get_global_registry
+
+    attached = list(getattr(bp, "attached_media", None) or [])
+    if attached:
+        # Use the real asset(s) from the source. Don't call any
+        # generation plugin — the user attached this on purpose.
+        return attached
 
     suggested = bp.suggested_media
     has_prompt = bool(bp.media_prompt)

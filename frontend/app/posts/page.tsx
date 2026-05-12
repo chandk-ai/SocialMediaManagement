@@ -8,8 +8,8 @@ import { TopBar } from '@/components/layout/TopBar';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { useApi, api, ApiError } from '@/lib/api/client';
 import type { Media, Post } from '@/lib/api/types';
-import { FileText, Check, Edit3, Trash2, Send, X, AlertTriangle, Plus, Image as ImageIcon } from 'lucide-react';
-import { useState } from 'react';
+import { FileText, Check, Edit3, Trash2, Send, X, AlertTriangle, Plus, Image as ImageIcon, Upload, Download, Link2 } from 'lucide-react';
+import { useRef, useState } from 'react';
 import { mutate } from 'swr';
 import { formatDateTime } from '@/lib/utils';
 
@@ -239,6 +239,68 @@ function EditDialog({ post, swrKey, onClose }: {
     setMedia(prev => prev.filter((_, i) => i !== idx));
   }
 
+  // Hidden <input type="file"> trigger — one ref per media row so the
+  // user's pick is scoped to the row they clicked. Reset between picks
+  // so re-selecting the same file still fires onChange.
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [activeRow, setActiveRow] = useState<number | null>(null);
+  const [importingRow, setImportingRow] = useState<number | null>(null);
+  const [uploadErr, setUploadErr] = useState<string | null>(null);
+
+  type UploadOut = {
+    url: string;
+    kind: 'image' | 'video';
+    content_type: string;
+    size_bytes: number;
+  };
+
+  function triggerFilePick(idx: number) {
+    setActiveRow(idx);
+    setUploadErr(null);
+    fileInputRef.current?.click();
+  }
+
+  async function onFileChosen(ev: React.ChangeEvent<HTMLInputElement>) {
+    const file = ev.target.files?.[0];
+    ev.target.value = '';   // reset so picking the same file again works
+    if (!file || activeRow === null) return;
+    const idx = activeRow;
+    setActiveRow(null);
+    setUploadErr(null);
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      const out = await api.postForm<UploadOut>('/media/upload', fd);
+      updateMedia(idx, { url: out.url, kind: out.kind });
+    } catch (e) {
+      const ae = e as ApiError;
+      setUploadErr(ae?.detail || (e as Error)?.message || 'Upload failed.');
+    }
+  }
+
+  async function importFromUrl(idx: number) {
+    const raw = window.prompt(
+      'Paste a YouTube / TikTok / Vimeo / direct video URL. We will download and host it for you.',
+    );
+    if (!raw) return;
+    const url = raw.trim();
+    if (!/^https?:\/\//i.test(url)) {
+      setUploadErr('URL must start with http:// or https://');
+      return;
+    }
+    setImportingRow(idx);
+    setUploadErr(null);
+    try {
+      const out = await api.post<UploadOut>('/media/import', { url });
+      updateMedia(idx, { url: out.url, kind: out.kind });
+    } catch (e) {
+      const ae = e as ApiError;
+      setUploadErr(ae?.detail || (e as Error)?.message || 'Import failed.');
+    } finally {
+      setImportingRow(null);
+    }
+  }
+
   async function save() {
     setBusy(true); setErr(null);
     try {
@@ -297,7 +359,7 @@ function EditDialog({ post, swrKey, onClose }: {
         <div className="mt-4">
           <div className="flex items-center justify-between mb-1">
             <label className="block text-xs text-ink-500">
-              Media (paste a public image / video URL)
+              Media (upload, import, or paste URL)
             </label>
             <button
               type="button"
@@ -307,55 +369,105 @@ function EditDialog({ post, swrKey, onClose }: {
               <Plus size={12} /> Add media
             </button>
           </div>
+
+          {/* Hidden input shared by every "Upload" button — onChange
+              fires once per pick and uses ``activeRow`` to know which
+              row the file belongs to. */}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/jpeg,image/png,image/webp,video/mp4,video/quicktime"
+            className="hidden"
+            onChange={onFileChosen}
+          />
+
           {media.length === 0 ? (
             <div className="text-xs text-ink-500 bg-ink-50 border border-dashed border-ink-200 rounded p-3 flex items-start gap-2">
               <ImageIcon size={14} className="mt-0.5 shrink-0" />
               <span>
                 No media attached. Some platforms (Instagram, Pinterest)
-                require an image or video. Paste a publicly reachable HTTPS
-                URL — works with Google Drive (sharing link → "Anyone with
-                the link"), Supabase Storage public buckets, S3 presigned
-                URLs, Unsplash, your CDN, etc.
+                require an image or video. Click <b>Add media</b> → then
+                either <b>Upload</b> a file from your computer, <b>Import</b>
+                a YouTube / TikTok / Vimeo link (we'll download and host
+                it), or paste any public HTTPS URL directly.
               </span>
             </div>
           ) : (
-            <div className="space-y-2">
+            <div className="space-y-3">
               {media.map((m, idx) => (
-                <div key={idx} className="flex gap-2 items-start">
-                  <div className="flex-1 space-y-1">
-                    <Input
-                      value={m.url}
-                      onChange={(e: any) => updateMedia(idx, { url: e.target.value })}
-                      placeholder="https://example.com/photo.jpg"
-                    />
-                    <div className="flex gap-2 items-center">
-                      <select
-                        value={m.kind}
-                        onChange={e => updateMedia(idx, { kind: e.target.value as Media['kind'] })}
-                        className="text-xs border border-ink-200 rounded px-2 py-1 bg-white"
-                      >
-                        <option value="image">Image</option>
-                        <option value="video">Video</option>
-                        <option value="gif">GIF</option>
-                      </select>
+                <div key={idx} className="border border-ink-200 rounded p-2 space-y-2">
+                  <div className="flex gap-2 items-start">
+                    <div className="flex-1 space-y-1">
                       <Input
-                        value={m.alt_text ?? ''}
-                        onChange={(e: any) => updateMedia(idx, { alt_text: e.target.value })}
-                        placeholder="Alt text (accessibility, optional)"
-                        className="flex-1 text-xs"
+                        value={m.url}
+                        onChange={(e: any) => updateMedia(idx, { url: e.target.value })}
+                        placeholder="https://example.com/photo.jpg — or use Upload / Import below"
                       />
+                      <div className="flex gap-2 items-center">
+                        <select
+                          value={m.kind}
+                          onChange={e => updateMedia(idx, { kind: e.target.value as Media['kind'] })}
+                          className="text-xs border border-ink-200 rounded px-2 py-1 bg-white"
+                        >
+                          <option value="image">Image</option>
+                          <option value="video">Video</option>
+                          <option value="gif">GIF</option>
+                        </select>
+                        <Input
+                          value={m.alt_text ?? ''}
+                          onChange={(e: any) => updateMedia(idx, { alt_text: e.target.value })}
+                          placeholder="Alt text (accessibility, optional)"
+                          className="flex-1 text-xs"
+                        />
+                      </div>
                     </div>
+                    <button
+                      type="button"
+                      onClick={() => removeMedia(idx)}
+                      className="text-ink-500 hover:text-red-600 p-1"
+                      title="Remove this attachment"
+                    >
+                      <Trash2 size={14} />
+                    </button>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => removeMedia(idx)}
-                    className="text-ink-500 hover:text-red-600 p-1"
-                    title="Remove this attachment"
-                  >
-                    <Trash2 size={14} />
-                  </button>
+                  {/* Per-row action toolbar */}
+                  <div className="flex gap-2 text-xs">
+                    <button
+                      type="button"
+                      onClick={() => triggerFilePick(idx)}
+                      className="flex items-center gap-1 px-2 py-1 rounded border border-ink-200 hover:bg-ink-50 text-ink-700"
+                    >
+                      <Upload size={12} /> Upload file
+                    </button>
+                    <button
+                      type="button"
+                      disabled={importingRow === idx}
+                      onClick={() => importFromUrl(idx)}
+                      className="flex items-center gap-1 px-2 py-1 rounded border border-ink-200 hover:bg-ink-50 text-ink-700 disabled:opacity-60"
+                    >
+                      <Download size={12} />
+                      {importingRow === idx ? 'Importing… (~30 s)' : 'Import from URL'}
+                    </button>
+                    {m.url && (
+                      <a
+                        href={m.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="ml-auto flex items-center gap-1 px-2 py-1 rounded text-ink-500 hover:text-ink-700"
+                        title="Open the media URL in a new tab to preview"
+                      >
+                        <Link2 size={12} /> Preview
+                      </a>
+                    )}
+                  </div>
                 </div>
               ))}
+            </div>
+          )}
+          {uploadErr && (
+            <div className="mt-2 flex items-start gap-2 text-xs text-red-800 bg-red-50 border border-red-200 rounded p-2">
+              <AlertTriangle size={12} className="mt-0.5 shrink-0" />
+              <span>{uploadErr}</span>
             </div>
           )}
         </div>

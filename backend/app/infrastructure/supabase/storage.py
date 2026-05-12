@@ -49,6 +49,20 @@ class SupabaseStorage:
             return result.get("signedURL") or result.get("signed_url") or ""
         return getattr(result, "signed_url", "") or getattr(result, "signedURL", "")
 
+    def public_url(self, path: str) -> str:
+        """Returns the permanent public URL for an object. Only valid if
+        the bucket is marked ``public=true`` in Supabase (which our
+        ``smms-media`` bucket is) — otherwise the URL 404s for
+        unauthenticated readers.
+
+        We need this — not signed_url — for media that platforms like
+        Meta fetch server-side at unpredictable times (e.g. scheduled
+        posts that publish hours or days later). Signed URLs would
+        expire before Meta's fetch happened. Public URLs never expire.
+        """
+        base = self.settings.supabase.url.rstrip("/")
+        return f"{base}/storage/v1/object/public/{self.bucket}/{path}"
+
     async def delete(self, paths: list[str]) -> None:
         client = self.factory.service_role()
 

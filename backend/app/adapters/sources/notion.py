@@ -31,11 +31,20 @@ from typing import Any, AsyncIterator
 
 from app.core.logging import get_logger
 from app.domain.entities.source import SourceItem
+from app.domain.value_objects.content import MediaAsset, MediaKind
 from app.plugins.registry import register_plugin
+from app.services.media_import import MediaImportError, MediaImportService
 
 from .base import ContentSource, SourceConnectionError
 
 log = get_logger(__name__)
+
+# Hard cap on how many media items we'll import per Notion page to keep
+# any one fetch() call bounded. The first few attachments are usually
+# the hero image / video and the most relevant for a post; later ones
+# are typically decorative.
+_MAX_MEDIA_PER_PAGE = 4
+
 
 # Default property names — overridable per-source via config.
 DEFAULT_STATUS_PROPERTY = "Status"
@@ -139,6 +148,18 @@ class NotionSource(ContentSource):
             metadata = {k: _flatten(v) for k, v in props.items()}
             if self.is_cms:
                 metadata.update(self._cms_metadata(props))
+
+            # Pull child blocks → extract image / video / file references →
+            # rehost in Supabase Storage so the URLs survive the ~1 hour
+            # Notion signed-URL expiry. Best-effort: import failures are
+            # logged but don't break the source iteration.
+            media: tuple[MediaAsset, ...] = ()
+            try:
+                media = await self._extract_page_media(page["id"])
+            except Exception as exc:                                    # noqa: BLE001
+                log.warning("notion_media_extract_failed",
+                            page_id=page["id"], error=str(exc))
+
             yield SourceItem(
                 external_id=page["id"],
                 title=title,
@@ -147,8 +168,108 @@ class NotionSource(ContentSource):
                 published_at=datetime.fromisoformat(
                     page["last_edited_time"].replace("Z", "+00:00")
                 ),
+                media=media,
                 metadata=metadata,
             )
+
+    # ── media extraction ──────────────────────────────────────────────────
+    async def _extract_page_media(self, page_id: str) -> tuple[MediaAsset, ...]:
+        """Walk a Notion page's block children and return its
+        image/video/file attachments as MediaAsset objects whose URLs
+        point at our Supabase bucket (not the short-lived Notion URLs).
+
+        Notion block shapes we care about:
+
+            { type: "image",
+              image: {
+                type: "file",
+                file: { url: "https://prod-files-secure.s3...", expiry_time: "..." }
+              } }
+
+            { type: "image",
+              image: {
+                type: "external",
+                external: { url: "https://example.com/x.png" }
+              } }
+
+        Same shape for ``video`` and ``file``. We deliberately don't
+        recurse into nested block trees here — only top-level children —
+        because deep recursion would make a 50-row database fetch
+        prohibitively slow on the worker. Pages with media nested deep
+        in toggles can be flattened by the user.
+        """
+        try:
+            import httpx
+        except ImportError:                                           # pragma: no cover
+            return ()
+
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            r = await client.get(
+                f"https://api.notion.com/v1/blocks/{page_id}/children",
+                params={"page_size": 100},
+                headers=self._headers(),
+            )
+            if r.status_code >= 400:
+                log.info("notion_blocks_fetch_failed",
+                         page_id=page_id, status=r.status_code,
+                         body=r.text[:200])
+                return ()
+            blocks = (r.json() or {}).get("results") or []
+
+        # Collect (source_url, kind) pairs in document order so the
+        # first image found becomes media[0] — natural mapping to "hero
+        # image" for downstream platform adapters.
+        candidates: list[tuple[str, MediaKind, str]] = []
+        for b in blocks:
+            btype = b.get("type")
+            if btype not in ("image", "video", "file"):
+                continue
+            payload = b.get(btype) or {}
+            if payload.get("type") == "file":
+                src = (payload.get("file") or {}).get("url")
+            elif payload.get("type") == "external":
+                src = (payload.get("external") or {}).get("url")
+            else:
+                src = None
+            if not src:
+                continue
+            kind = (
+                MediaKind.VIDEO if btype == "video"
+                else MediaKind.IMAGE if btype == "image"
+                # ``file`` blocks could be anything — infer from URL
+                else (MediaKind.VIDEO if _looks_like_video(src) else MediaKind.IMAGE)
+            )
+            alt = _extract_block_caption(payload.get("caption"))
+            candidates.append((src, kind, alt))
+            if len(candidates) >= _MAX_MEDIA_PER_PAGE:
+                break
+
+        if not candidates:
+            return ()
+
+        importer = MediaImportService()
+        # OrgId comes through self.config["__org_id__"] when the
+        # plugin host wires it; fall back to the synthetic "shared"
+        # bucket key if the host didn't set it (only happens in legacy
+        # CLI smoke tests). The storage path is org-scoped either way.
+        org_id = str(self.config.get("__org_id__") or "shared")
+
+        assets: list[MediaAsset] = []
+        for src, kind, alt in candidates:
+            try:
+                result = await importer.import_url(
+                    org_id=org_id, url=src,
+                    filename_hint=f"notion-{kind.value}",
+                )
+                assets.append(MediaAsset(
+                    url=result.url, kind=kind, alt_text=alt or None,
+                ))
+            except MediaImportError as exc:
+                # One bad asset shouldn't sink the page — drop it,
+                # log, keep going.
+                log.info("notion_media_skipped",
+                         page_id=page_id, src=src, error=str(exc))
+        return tuple(assets)
 
     # ── CMS writeback ────────────────────────────────────────────────────
     async def mark_published(
@@ -291,3 +412,23 @@ def _render_page_text(page: dict) -> str:
         if isinstance(f, str) and f.strip():
             parts.append(f"{k}: {f}")
     return "\n".join(parts)
+
+
+# Filename-based heuristic for ambiguous ``file`` blocks. Real video
+# inspection would require sniffing the bytes (out of scope here).
+_VIDEO_EXTS = (".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi")
+
+
+def _looks_like_video(url: str) -> bool:
+    u = url.split("?", 1)[0].lower()
+    return any(u.endswith(ext) for ext in _VIDEO_EXTS)
+
+
+def _extract_block_caption(caption: Any) -> str:
+    """Notion block captions live in a rich-text array — flatten it
+    so we can pass it through as ``alt_text``."""
+    if not isinstance(caption, list):
+        return ""
+    return "".join(
+        t.get("plain_text", "") for t in caption if isinstance(t, dict)
+    )

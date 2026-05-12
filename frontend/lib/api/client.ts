@@ -116,12 +116,32 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return (await res.json()) as T;
 }
 
+async function requestForm<T>(path: string, form: FormData): Promise<T> {
+  // Don't set Content-Type — the browser sets multipart/form-data with
+  // the right ``boundary`` automatically when you pass a FormData.
+  // Reuse the same auth/error-handling shape as the JSON path.
+  const url = `${BASE}${path}`;
+  const token = await getAccessToken();
+  const headers: Record<string, string> = {};
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const res = await fetch(url, { method: 'POST', body: form, headers });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { detail = formatDetail(await res.json()) || res.statusText; }
+    catch { try { detail = await res.text(); } catch { /* ignore */ } }
+    throw new ApiError(res.status, detail || 'Upload failed', url);
+  }
+  if (res.status === 204) return undefined as T;
+  return (await res.json()) as T;
+}
+
 export const api = {
   get:    <T>(p: string) => request<T>(p),
   post:   <T>(p: string, body?: unknown) => request<T>(p, { method: 'POST',  body: JSON.stringify(body ?? {}) }),
   put:    <T>(p: string, body?: unknown) => request<T>(p, { method: 'PUT',   body: JSON.stringify(body ?? {}) }),
   patch:  <T>(p: string, body?: unknown) => request<T>(p, { method: 'PATCH', body: JSON.stringify(body ?? {}) }),
   del:    <T>(p: string) => request<T>(p, { method: 'DELETE' }),
+  postForm: <T>(p: string, form: FormData) => requestForm<T>(p, form),
 };
 
 export function useApi<T>(path: string | null, opts?: SWRConfiguration) {
