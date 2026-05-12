@@ -210,13 +210,18 @@ async def oauth_callback(
     # Provider-specific post-OAuth enrichment so adapters have what they need.
     enriched_config = dict(p.config or {})
     pages_available: list[dict] = []
+    enrichment_error: str | None = None
     if p.plugin_name in ("facebook", "instagram", "threads"):
         try:
             pages_available = await _fetch_meta_pages_and_ig(
                 user_token=token.access_token,
                 want_instagram=(p.plugin_name == "instagram"),
             )
-        except Exception:                                       # noqa: BLE001
+        except Exception as exc:                                # noqa: BLE001
+            # Capture the real reason so the user sees it instead of an
+            # empty config and a generic "no IG Business Account linked"
+            # PlatformValidationError downstream.
+            enrichment_error = f"{type(exc).__name__}: {exc}"[:500]
             pages_available = []
         # Auto-pick if only one Page; otherwise leave for the user to choose
         # via the Settings dialog (Page picker) before publishing.
@@ -229,25 +234,86 @@ async def oauth_callback(
             if p.plugin_name == "instagram" and page.get("instagram_business_account"):
                 enriched_config["ig_user_id"] = page["instagram_business_account"].get("id")
                 enriched_config["ig_username"] = page["instagram_business_account"].get("username")
+            # For Instagram we must NOT fall back to page_id when no IG
+            # is linked — using a Page ID as the IG account id sends
+            # POSTs against an invalid object and confuses everyone.
+            # For Facebook/Threads, page_id is correct.
+            if p.plugin_name == "instagram":
+                fallback_account = enriched_config.get("ig_user_id") or ""
+            else:
+                fallback_account = enriched_config.get("ig_user_id") or page["id"]
             creds = OAuthCredentials(
                 access_token=creds.access_token,
                 refresh_token=creds.refresh_token,
                 scopes=creds.scopes,
-                account_id=enriched_config.get("ig_user_id") or page["id"],
+                account_id=fallback_account,
                 account_handle=enriched_config.get("ig_username") or page.get("name"),
             )
 
     p.config = enriched_config
     if pages_available:
+        # Persist the list so a Page-picker UI can offer it later.
         p.config["__pages_available__"] = pages_available
+    if enrichment_error:
+        p.config["__enrichment_error__"] = enrichment_error
     p.mark_connected(creds)
     await svc.repo.update(p)
+
+    # Classify the outcome so the UI / API consumer knows what to do
+    # next without having to guess from a bare 200.
+    setup_status = "ready"
+    setup_message = "Account ready to publish."
+    needs_picker = False
+    if p.plugin_name in ("facebook", "instagram", "threads"):
+        ig_required = (p.plugin_name == "instagram")
+        has_page = bool(enriched_config.get("page_id"))
+        has_ig = bool(enriched_config.get("ig_user_id"))
+        if enrichment_error:
+            setup_status = "enrichment_failed"
+            setup_message = (
+                f"Meta API call failed while looking up your Pages: "
+                f"{enrichment_error}. Reconnect and grant access to a "
+                f"Facebook Page that owns your IG Business / Creator account."
+            )
+        elif len(pages_available) == 0:
+            setup_status = "no_pages"
+            setup_message = (
+                "Meta returned zero Facebook Pages for your account. "
+                + ("To publish to Instagram you need: (1) an IG Business "
+                   "or Creator account, (2) linked to a Facebook Page you "
+                   "admin. Convert via Instagram app → Settings → Account "
+                   "type → Switch to Professional, then link a Page from "
+                   "the same screen, then reconnect here."
+                   if ig_required else
+                   "Make sure you admin at least one Facebook Page, then reconnect.")
+            )
+        elif len(pages_available) > 1 and not (has_page and (has_ig or not ig_required)):
+            setup_status = "needs_page_picker"
+            needs_picker = True
+            setup_message = (
+                f"You admin {len(pages_available)} Facebook Pages. "
+                "Open the platform's settings and pick the one that owns "
+                + ("the Instagram Business account you want to publish to."
+                   if ig_required else "the audience you want to publish to.")
+            )
+        elif ig_required and not has_ig:
+            setup_status = "no_ig_link"
+            page_name = enriched_config.get("page_name") or "the selected Page"
+            setup_message = (
+                f"Connected via Facebook Page '{page_name}', but no "
+                "Instagram Business / Creator account is linked to that "
+                "Page. Link the IG account inside the Page's Meta Business "
+                "Suite (Settings → Linked Accounts), then reconnect."
+            )
+
     return {
         "platform_id": str(platform_id),
         "status": p.status.value,
         "account_id": creds.account_id,
         "pages_available": len(pages_available),
-        "needs_picker": len(pages_available) > 1,
+        "needs_picker": needs_picker,
+        "setup_status": setup_status,
+        "setup_message": setup_message,
     }
 
 
