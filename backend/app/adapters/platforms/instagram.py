@@ -110,8 +110,10 @@ class InstagramPlatform(SocialPlatform):
                 "caption": caption,
                 "access_token": token,
             }
-            if media.kind == "video":
-                create_data["media_type"] = "REELS"      # default to Reels for video
+            if _is_video_asset(media):
+                # Reels container — Meta processes asynchronously, so
+                # step 2 (poll) is mandatory for video.
+                create_data["media_type"] = "REELS"
                 create_data["video_url"] = media.url
             else:
                 create_data["image_url"] = media.url
@@ -222,3 +224,45 @@ async def _wait_for_container(
 def _compose(payload: PostPayload) -> str:
     tags = " ".join(h.value for h in payload.hashtags)
     return f"{payload.text}\n.\n.\n{tags}".strip()
+
+
+# ── media-kind sniffer ─────────────────────────────────────────────────
+# A simple ``media.kind == "video"`` worked in theory because MediaKind
+# is a ``str, Enum`` subclass — but the May 12 2026 incident proved
+# that's not enough in practice: a video Post landed at Meta's
+# image_url endpoint and got rejected as "image with aspect ratio ()".
+# Root cause was a representation drift somewhere in the
+# Post → DraftPost → PostPayload pipeline (a dict slipped through
+# where a MediaAsset should have been; or the kind field deserialized
+# to a plain string in a code path the unit tests didn't cover).
+#
+# Rather than chase that one buggy callsite, this helper makes the
+# IG adapter robust to ANY plausible representation:
+#
+#   * MediaKind enum                  — the documented contract
+#   * Plain string "video"            — what JSON deserialization
+#                                       might leave behind
+#   * MediaAsset with .kind = None    — defensive
+#   * Filename / URL extension        — last-resort sniff for the
+#                                       case where ``kind`` was lost
+#                                       entirely
+_VIDEO_EXTENSIONS = (".mp4", ".mov", ".m4v", ".webm", ".mkv")
+
+
+def _is_video_asset(media: Any) -> bool:
+    kind = getattr(media, "kind", None)
+    if kind is not None:
+        # MediaKind is a str-Enum so .value works; raw strings have no
+        # .value so we fall through to str().
+        kind_value = (
+            kind.value if hasattr(kind, "value") else str(kind)
+        ).lower()
+        if kind_value == "video":
+            return True
+        if kind_value in ("image", "gif", "document"):
+            return False
+    # URL-extension sniff — covers the case where kind was dropped /
+    # mistyped upstream. Bias toward False for unknown extensions so
+    # we never accidentally route an image through the Reels path.
+    url = (getattr(media, "url", "") or "").lower().split("?", 1)[0]
+    return any(url.endswith(ext) for ext in _VIDEO_EXTENSIONS)

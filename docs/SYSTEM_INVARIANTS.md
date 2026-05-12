@@ -246,6 +246,19 @@ prose belongs in module docstrings; this file is a checklist.
   `run.metadata['drafts']` only — the user must see it on the Posts
   page.
 
+* **Never compare ``media.kind`` directly to a string literal in a
+  platform adapter.** ``MediaKind(str, Enum)`` *should* satisfy
+  ``media.kind == "video"`` but a real-world representation drift
+  (May 12 2026 incident — video Post got routed to
+  ``image_url``) proves it doesn't in every code path. Use the
+  ``_is_video_asset(media)`` helper pattern from
+  ``app/adapters/platforms/instagram.py`` which checks:
+    1. ``MediaKind`` enum's ``.value``
+    2. ``str(kind)``  (representation drift)
+    3. URL extension fallback (``.mp4 .mov .m4v .webm .mkv``)
+  Mirror this helper into every adapter that branches on kind
+  (Pinterest, TikTok, Facebook, X, etc.) — currently only IG has it.
+
 * **`MediaAsset.url` on a `Post` must be permanent + HTTPS.** The
   Instagram adapter's `validate()` rejects HTTP and YouTube/Drive
   view URLs. Use `MediaImportService` to re-host non-direct URLs.
