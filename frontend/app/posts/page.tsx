@@ -372,11 +372,14 @@ function EditDialog({ post, swrKey, onClose }: {
 
           {/* Hidden input shared by every "Upload" button — onChange
               fires once per pick and uses ``activeRow`` to know which
-              row the file belongs to. */}
+              row the file belongs to. The ``accept`` attribute is a
+              UX hint only; the backend re-validates regardless and
+              also sniffs the filename extension when macOS reports
+              a generic content-type. */}
           <input
             ref={fileInputRef}
             type="file"
-            accept="image/jpeg,image/png,image/webp,video/mp4,video/quicktime"
+            accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/quicktime"
             className="hidden"
             onChange={onFileChosen}
           />

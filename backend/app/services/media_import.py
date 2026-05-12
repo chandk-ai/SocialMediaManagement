@@ -45,11 +45,15 @@ log = get_logger(__name__)
 
 
 # ── Limits ──────────────────────────────────────────────────────────
-# These match the FastAPI endpoint defaults so behavior is identical
-# whether import is called via HTTP or directly. Update both together
-# if you ever bump the cap.
-MAX_BYTES = 100 * 1024 * 1024                     # 100 MB
-HTTP_FETCH_TIMEOUT = 90.0                         # seconds
+# 500 MB ceiling — comfortably covers LinkedIn (200 MB), Facebook
+# (1.75 GB if needed, capped here), and Twitter (512 MB) video posts
+# while leaving headroom. Instagram still rejects above 100 MB at
+# publish time, which is enforced by the IG adapter's ``validate()``
+# rather than this generic cap. Update both this value AND the
+# Supabase bucket's ``file_size_limit`` (in storage.buckets) together
+# if you change it — they need to agree.
+MAX_BYTES = 500 * 1024 * 1024                     # 500 MB
+HTTP_FETCH_TIMEOUT = 300.0                        # seconds (5 min for big videos)
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]")
 
 # MIME → file extension. Anything not listed falls back to a generic
@@ -119,12 +123,30 @@ class MediaImportService:
         """Persist already-in-memory bytes. Caller has done its own
         size check (e.g. streaming upload guard). We re-validate the
         mime here so the endpoint and the source-plugin call site
-        share the same allow-list."""
-        ct = (content_type or "application/octet-stream").lower()
+        share the same allow-list.
+
+        Browsers on macOS sometimes hand us a generic / wrong
+        ``content_type`` (e.g. ``text/plain`` for a ``.png`` saved
+        from a screenshot, or ``application/octet-stream`` for a
+        QuickTime ``.mov``). Falling back to a filename-extension
+        sniff covers those cases without trusting the client header
+        blindly — we still only ever accept mimes from the allow-list.
+        """
+        ct = (content_type or "application/octet-stream").lower().split(";")[0].strip()
         if ct not in _ALLOWED_MIMES:
-            raise MediaImportError(
-                f"Unsupported media type {ct!r}. Allowed: {sorted(_ALLOWED_MIMES)}",
-            )
+            sniffed = _sniff_mime_from_name(filename or "")
+            if sniffed in _ALLOWED_MIMES:
+                log.info("media_import_mime_recovered",
+                         declared=ct, sniffed=sniffed, filename=filename)
+                ct = sniffed
+            else:
+                raise MediaImportError(
+                    f"Unsupported media type {ct!r}. "
+                    f"Allowed: {sorted(_ALLOWED_MIMES)}. "
+                    f"If the file is an image / video, rename it with the "
+                    f"correct extension (.jpg / .png / .webp / .gif / .mp4 / "
+                    f".mov) and try again."
+                )
         size = len(data)
         if size > MAX_BYTES:
             raise MediaImportError(
