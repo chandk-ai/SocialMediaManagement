@@ -57,23 +57,60 @@ T = TypeVar("T")
 
 # ── mappers ────────────────────────────────────────────────────────────────
 def _platform_to_domain(orm: PlatformORM) -> Platform:
+    # Bridge the joined `credentials` relationship into the domain
+    # OAuthCredentials. Without this the adapters always saw
+    # `Platform.credentials is None` even when a token row existed,
+    # producing the silent "no Instagram Business Account linked"
+    # publish failures (May 11 2026 incident).
+    creds = None
+    if orm.credentials is not None:
+        from app.domain.value_objects.credentials import (
+            EncryptedToken, OAuthCredentials,
+        )
+        c = orm.credentials
+        creds = OAuthCredentials(
+            access_token=EncryptedToken(
+                ciphertext=bytes(c.ciphertext),
+                key_id=c.key_id,
+                expires_at=c.expires_at,
+            ),
+            refresh_token=None,
+            scopes=tuple(c.scopes or ()),
+            account_id=orm.account_external_id or "",
+            account_handle=orm.account_handle,
+        )
     return Platform(
         id=PlatformId(orm.id), org_id=OrgId(orm.org_id),
         plugin_name=orm.plugin_name, display_name=orm.display_name,
         account_handle=orm.account_handle, account_external_id=orm.account_external_id,
         status=PlatformStatus(orm.status), config=dict(orm.config or {}),
         is_default=bool(orm.is_default),
+        credentials=creds,
         created_at=orm.created_at, last_used_at=orm.last_used_at,
     )
 
 
 def _platform_to_orm(d: Platform) -> PlatformORM:
-    return PlatformORM(
+    # Mirror credentials in both directions. The relationship is
+    # cascade="all, delete-orphan" so attaching a fresh
+    # PlatformCredentialsORM via s.merge(orm) inserts the row
+    # transactionally with the platform update.
+    orm = PlatformORM(
         id=d.id, org_id=d.org_id, plugin_name=d.plugin_name,
         display_name=d.display_name, account_handle=d.account_handle,
         account_external_id=d.account_external_id, status=d.status.value,
         is_default=d.is_default, config=d.config,
     )
+    if d.credentials is not None:
+        from app.infrastructure.db.models import PlatformCredentialsORM
+        orm.credentials = PlatformCredentialsORM(
+            platform_id=d.id,
+            ciphertext=d.credentials.access_token.ciphertext,
+            key_id=d.credentials.access_token.key_id,
+            scopes=list(d.credentials.scopes or ()),
+            expires_at=d.credentials.access_token.expires_at,
+        )
+    return orm
 
 
 def _source_to_domain(orm: SourceORM) -> Source:
