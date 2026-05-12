@@ -155,7 +155,14 @@ async def publish_post_now(
     svc: PostService = Depends(get_post_service),
     audit: AuditLogService | None = Depends(get_audit_log_service),
 ) -> dict:
-    """Approve (if needed) and immediately enqueue for publishing."""
+    """Approve (if needed) and immediately enqueue for publishing.
+
+    Pre-flight checks here so the user sees the real problem (no media,
+    platform not connected, missing OAuth credential) **before** the
+    publish job vanishes into Celery's autoretry loop. Previously a
+    silently broken platform led to a queued-but-never-completed state
+    that produced no audit signal for ~10 minutes.
+    """
     if not user.role.can_edit():
         raise HTTPException(status_code=403, detail="Editor role required")
     p = await _require_owned(svc, OrgId(UUID(user.org_id)), PostId(post_id))
@@ -164,6 +171,31 @@ async def publish_post_now(
             status_code=409,
             detail=f"post is {p.status.value}; cannot publish",
         )
+
+    # ── Pre-flight: platform exists + has stored OAuth credentials ──
+    # We use the same repo factory the workers use. Platform fetches
+    # are org-scoped.
+    from app.api.deps import _build_repos
+    platform_repo = _build_repos()["platform"]
+    platform = await platform_repo.get(OrgId(UUID(user.org_id)), p.platform_id)
+    if platform is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Platform {p.platform_id} not found. The platform "
+                   "may have been deleted — reconnect it from Settings → "
+                   "Platforms.",
+        )
+    if getattr(platform, "credentials", None) is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Platform '{platform.display_name}' ({platform.plugin_name}) "
+                f"shows status='{platform.status.value if hasattr(platform.status, 'value') else platform.status}' but no OAuth token is stored. "
+                f"The connect flow likely didn't complete. "
+                f"Go to Settings → Platforms → Reconnect this account."
+            ),
+        )
+
     p.approve()
     p.scheduled_for = None
     await svc.repo.update(p)

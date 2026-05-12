@@ -138,21 +138,46 @@ export default function AnalyticsPage() {
               <Card>
                 <CardTitle>Daily throughput</CardTitle>
                 <CardDescription>Posts created per day · last 14 days</CardDescription>
-                <div className="mt-4 grid grid-cols-14 gap-1 h-32 items-end">
-                  {byDay.map(({ date, count }) => {
-                    const max = Math.max(...byDay.map(d => d.count), 1);
-                    return (
-                      <div key={date} className="flex flex-col items-center gap-1 group">
-                        <div
-                          className="w-full bg-accent rounded-t group-hover:bg-accent-fg transition-colors"
-                          style={{ height: `${Math.max(8, (count / max) * 100)}%` }}
-                          title={`${date}: ${count} posts`}
-                        />
-                        <div className="text-[10px] text-ink-500">{date.slice(5)}</div>
-                      </div>
-                    );
-                  })}
-                </div>
+                {byDay.length === 0 ? (
+                  <p className="mt-4 text-xs text-ink-500">No data yet.</p>
+                ) : (
+                  // Tailwind only ships grid-cols-1..12. Use a real CSS
+                  // grid-template-columns via inline style so the number
+                  // of bars matches the data length (was previously
+                  // hard-coded to grid-cols-14, which Tailwind discards
+                  // — collapsing all bars into one centred column).
+                  <div
+                    className="mt-4 grid gap-1 h-32 items-end"
+                    style={{ gridTemplateColumns: `repeat(${byDay.length}, minmax(0, 1fr))` }}
+                  >
+                    {byDay.map(({ date, count }) => {
+                      const max = Math.max(...byDay.map(d => d.count), 1);
+                      // Empty days get a 4px sliver so the axis stays
+                      // legible — but only when there's any data at all
+                      // (else the whole chart looks artificially full).
+                      const anyPosts = byDay.some(d => d.count > 0);
+                      const heightPct = anyPosts
+                        ? Math.max(count > 0 ? 8 : 4, (count / max) * 100)
+                        : 4;
+                      return (
+                        <div key={date} className="flex flex-col items-center gap-1 group min-w-0">
+                          <div
+                            className={`w-full rounded-t transition-colors ${
+                              count > 0
+                                ? 'bg-accent group-hover:bg-accent-fg'
+                                : 'bg-ink-200 group-hover:bg-ink-300'
+                            }`}
+                            style={{ height: `${heightPct}%` }}
+                            title={`${date}: ${count} ${count === 1 ? 'post' : 'posts'}`}
+                          />
+                          <div className="text-[10px] text-ink-500 leading-none">
+                            {date.slice(5)}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </Card>
 
               {/* Recent activity */}
