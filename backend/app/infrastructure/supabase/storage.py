@@ -65,7 +65,16 @@ class SupabaseStorage:
         return ``415 invalid_mime_type``.
         """
         base = self.settings.supabase.url.rstrip("/")
-        service_key = self.settings.supabase.service_role_key
+        # ``service_role_key`` is wrapped in pydantic.SecretStr so it
+        # doesn't leak via __repr__ / logging by accident. httpx headers
+        # need a plain str — unwrap with .get_secret_value() exactly at
+        # the wire boundary, never store the unwrapped form on ``self``.
+        service_key_raw = self.settings.supabase.service_role_key
+        service_key = (
+            service_key_raw.get_secret_value()
+            if hasattr(service_key_raw, "get_secret_value")
+            else str(service_key_raw)
+        )
         url = f"{base}/storage/v1/object/{self.bucket}/{path}"
 
         ct = content_type or "application/octet-stream"
