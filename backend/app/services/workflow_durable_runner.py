@@ -36,6 +36,7 @@ Failure semantics:
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -139,6 +140,42 @@ def _draft_from_dict(d: dict[str, Any]) -> DraftPost:
         ],
         blueprint_ref=_bp_from_dict(d["blueprint_ref"]) if d.get("blueprint_ref") else None,
     )
+
+
+# ── Secret scrubbing ────────────────────────────────────────────────
+# Strip anything key-shaped from a string before we persist it to a
+# trace event or job error column. We had a Gemini incident (May 11
+# 2026) where the user's API key landed in the Jobs UI because httpx
+# included the request URL — `?key=AIzaSy…` — in its exception
+# message. The Gemini provider has been changed to use a header, but
+# this scrubber acts as defense-in-depth for any other provider that
+# might do the same in the future.
+_SECRET_PATTERNS = [
+    # Google API keys (`AIza…`, 39 chars)
+    re.compile(r"AIza[0-9A-Za-z\-_]{30,}"),
+    # Bearer / api_key URL params
+    re.compile(r"(?i)([?&](?:key|api[_-]?key|access[_-]?token)=)[^\s&'\"]+"),
+    # Authorization headers
+    re.compile(r"(?i)(authorization\s*[:=]\s*bearer\s+)\S+"),
+    # OpenAI-style (`sk-…`, 20+ chars)
+    re.compile(r"sk-[A-Za-z0-9]{20,}"),
+    # Anthropic-style (`sk-ant-…`)
+    re.compile(r"sk-ant-[A-Za-z0-9\-_]{20,}"),
+    # Generic long base64-looking tokens (≥ 40 chars) in url params
+    re.compile(r"(?i)([?&]token=)[^\s&'\"]{20,}"),
+]
+
+
+def _scrub_secrets(text: str) -> str:
+    if not text:
+        return text
+    out = text
+    for pat in _SECRET_PATTERNS:
+        if pat.groups:
+            out = pat.sub(r"\1<redacted>", out)
+        else:
+            out = pat.sub("<redacted>", out)
+    return out
 
 
 @dataclass(slots=True)
@@ -268,12 +305,19 @@ class DurableWorkflowRunner:
                 await self.run_repo.update(run)
                 raise PermanentError(str(exc)) from exc
 
+            # Scrub anything that looks like an API key, bearer token,
+            # or `?key=...` URL parameter before persisting the error to
+            # the trace. We had a Gemini incident where the full URL —
+            # including the API key — landed in the job error column.
+            err_text = _scrub_secrets(str(exc))[:1000]
             run.append(AgentTraceEvent(
                 agent="runner", event=f"phase_{phase}_failed",
-                payload={"error": str(exc)[:1000]},
+                payload={"error": err_text},
             ))
             await self.run_repo.update(run)
-            raise
+            # Re-raise a clean copy so the queue's own error column also
+            # gets the scrubbed text.
+            raise RuntimeError(err_text) from None
 
         await self.run_repo.update(run)
         out: dict[str, Any] = {**result.extras}
