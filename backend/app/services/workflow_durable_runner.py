@@ -346,6 +346,15 @@ class DurableWorkflowRunner:
             raise RuntimeError(err_text) from None
 
         await self.run_repo.update(run)
+        # Emit a workflow-level audit event on terminal transitions so
+        # the /audit page reflects the actual lifecycle of every run,
+        # not just the initial /run-now click. We only fire on the
+        # statuses that a human cares about: SUCCEEDED (real post went
+        # out), FAILED (something broke), AWAITING_REVIEW (human action
+        # required). Intermediate phases (SELECTING / PLANNING / …)
+        # would just spam the log.
+        await self._emit_terminal_audit(run, wf, phase)
+
         out: dict[str, Any] = {**result.extras}
         if result.done:
             out["done"] = True
@@ -866,6 +875,77 @@ class DurableWorkflowRunner:
                 log.warning("durable_platform_lookup_failed",
                             platform_id=str(pid), error=str(exc))
         return names or [str(p) for p in wf.platform_ids]
+
+    async def _emit_terminal_audit(
+        self, run: WorkflowRun, wf, phase: str,
+    ) -> None:
+        """Write a workflow-level audit row when a run reaches a state
+        the user actually cares about. Idempotent-per-status: each run
+        emits at most one ``workflow.run.succeeded`` /
+        ``workflow.run.failed`` / ``workflow.run.awaiting_review``,
+        tracked via ``run.metadata['audit_terminal_emitted']`` so a
+        phase retry after the transition doesn't double-log.
+
+        Best-effort — audit failures must never break the run. The
+        whole call is wrapped in try/except so a broken hash chain or
+        DB hiccup doesn't cascade into FAILED runs.
+        """
+        try:
+            status_val = (
+                run.status.value if hasattr(run.status, "value") else str(run.status)
+            ).lower()
+        except Exception:                                             # noqa: BLE001
+            return
+
+        # Map run status → audit action. Anything not in this map is
+        # silently ignored (running, queued, etc. aren't audit-worthy).
+        action_map = {
+            "succeeded":       "workflow.run.succeeded",
+            "failed":          "workflow.run.failed",
+            "awaiting_review": "workflow.run.awaiting_review",
+        }
+        action = action_map.get(status_val)
+        if action is None:
+            return
+
+        # Idempotency guard — once we've audited this status for this
+        # run, don't repeat. Phase retries can re-enter run_phase
+        # multiple times after the run is already SUCCEEDED.
+        emitted = run.metadata.setdefault("audit_terminal_emitted", [])
+        if status_val in emitted:
+            return
+
+        try:
+            from app.api.deps import get_audit_log_service
+            audit = get_audit_log_service()
+            if audit is None:
+                return
+            await audit.record(
+                org_id=str(run.org_id),
+                actor_type="system",
+                action=action,
+                resource_type="workflow",
+                resource_id=run.workflow_id,
+                after={
+                    "run_id": str(run.id),
+                    "phase": phase,
+                    "trigger_kind": (run.metadata or {}).get("trigger_kind") or "manual",
+                    "error": run.error,
+                    "post_ids": list(run.metadata.get("post_ids") or []),
+                },
+            )
+            emitted.append(status_val)
+            # Persist the marker so a worker restart between transition
+            # and audit doesn't re-emit. ``setdefault`` already mutated
+            # run.metadata; the next run_repo.update() in run_phase
+            # would persist it, but the emit happens AFTER the update —
+            # so write again here.
+            await self.run_repo.update(run)
+        except Exception as exc:                                      # noqa: BLE001
+            log.warning("workflow_audit_emit_failed",
+                        run_id=str(run.id),
+                        action=action,
+                        error=_scrub_secrets(str(exc))[:200])
 
     async def _materialize_drafts_as_review(
         self, run: WorkflowRun, wf,

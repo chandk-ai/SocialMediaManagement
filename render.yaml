@@ -80,7 +80,16 @@ services:
     runtime: docker
     rootDir: backend
     plan: starter
-    dockerCommand: celery -A app.infrastructure.queue.celery_app.celery_app worker -Q workflows,publish,publish_dlq -l info
+    # ``default`` is required so the worker drains:
+    #   * app.workers.scheduler.tick_scheduler  (Beat hits every minute —
+    #     this is what fires scheduled workflows)
+    #   * app.workers.metrics_collector.collect_all_metrics  (Beat hits
+    #     every 3 hours)
+    # Both tasks are routed to the ``default`` queue in celery_app.py.
+    # Forgetting ``default`` here is a silent failure mode: Beat enqueues
+    # the tasks every minute, no worker consumes them, and scheduled
+    # runs never fire (incident May 12 2026).
+    dockerCommand: celery -A app.infrastructure.queue.celery_app.celery_app worker -Q default,workflows,publish,publish_dlq -l info
     envVars:
       - key: ENV
         value: prod

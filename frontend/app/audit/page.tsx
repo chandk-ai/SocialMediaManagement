@@ -143,11 +143,23 @@ function AuditPageImpl() {
 
   // Build the query string the API expects. Memoised so the fetch
   // useEffect doesn't re-fire on identical re-renders.
+  // NOTE on dates: ``<input type="datetime-local">`` emits ``YYYY-MM-DDTHH:MM``
+  // with no timezone, interpreted by the browser as the user's LOCAL time.
+  // FastAPI / Postgres treat that as UTC if we send it naked, which silently
+  // shifts the filter window (May 11 incident: a "since 10am" picked from
+  // Pacific would filter the wrong 7-hour band). Convert local→ISO with
+  // explicit UTC offset before sending.
   const queryString = useMemo(() => {
     const p = new URLSearchParams();
     p.set('limit', '50');
     for (const [k, v] of Object.entries(filters)) {
-      if (v.trim()) p.set(k, v.trim());
+      if (!v.trim()) continue;
+      if ((k === 'since' || k === 'until') && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(v)) {
+        const asUtc = new Date(v).toISOString();
+        p.set(k, asUtc);
+      } else {
+        p.set(k, v.trim());
+      }
     }
     return p.toString();
   }, [filters]);

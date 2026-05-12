@@ -120,9 +120,19 @@ class AuditLogService:
             )
             rows = list(result.mappings())
 
+        skipped_legacy = 0
         for r in rows:
             row_hash = r["row_hash"]
             expected = r["expected_row_hash"]
+            # Rows inserted before the hash-chain feature shipped
+            # (migration 008 / niche #9) have NULL row_hash. They
+            # predate verification and should NOT be flagged as
+            # "tampered" — they're just untouched legacy entries.
+            # Skip them entirely so the banner only fires on REAL
+            # post-chain tampering.
+            if row_hash is None:
+                skipped_legacy += 1
+                continue
             row_ok = row_hash == expected
             link_ok = (
                 prior_hash is None

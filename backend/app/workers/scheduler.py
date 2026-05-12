@@ -93,9 +93,49 @@ async def _tick_async() -> int:
                      org_id=str(org_id),
                      kind=wf.schedule.kind.value)
             enqueued += 1
+
+            # ONCE schedules need a "disarm" step or they'll fire on
+            # every subsequent tick (run_at <= now stays true forever).
+            # We disarm by clearing run_at — the workflow stays active,
+            # just with no more scheduled runs until the user reschedules
+            # via the UI. INTERVAL and CRON are self-spacing through
+            # their own time arithmetic so they don't need this guard.
+            if wf.schedule.kind is ScheduleKind.ONCE:
+                try:
+                    await _disarm_once_schedule(workflow_repo, org_id, wf)
+                except Exception as exc:                              # noqa: BLE001
+                    # Disarm failure is non-fatal — next tick would
+                    # double-fire, which is bad but recoverable, vs.
+                    # raising and breaking the whole tick.
+                    log.warning("scheduler_disarm_failed",
+                                workflow_id=str(wf.id), error=str(exc))
     log.info("scheduler_tick_done",
              active_workflows=len(pairs), enqueued=enqueued)
     return enqueued
+
+
+async def _disarm_once_schedule(repo, org_id, wf) -> None:
+    """A ``Schedule(kind=ONCE)`` requires ``run_at`` (per Schedule's
+    own validator), so we can't simply null the run_at field — the
+    value object would refuse to construct. We instead downgrade the
+    kind to MANUAL once consumed; the user can rearm via the UI by
+    picking a new date, which re-creates a fresh ONCE schedule.
+
+    Why downgrade rather than mark-consumed with a flag: the Schedule
+    value object is intentionally minimal — adding a 'consumed_at'
+    field would propagate through every persistence layer + UI form.
+    MANUAL is the natural "no automatic runs" state and already exists.
+    """
+    from app.domain.value_objects.schedule import Schedule, ScheduleKind
+
+    wf.schedule = Schedule(
+        kind=ScheduleKind.MANUAL,
+        cron=None,
+        interval_minutes=None,
+        run_at=None,
+        timezone=wf.schedule.timezone,
+    )
+    await repo.update(wf)
 
 
 def _is_due(wf: Workflow, now: datetime) -> bool:
