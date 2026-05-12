@@ -53,6 +53,13 @@ services:
       - key: LLM_ANTHROPIC_API_KEY
         sync: false
 
+      # ── YouTube cookies (base64 of Netscape-format cookies.txt
+      # exported from a logged-in browser). Optional — when missing,
+      # yt-dlp tries iOS / Android player clients before giving up.
+      # See docs/RUNBOOK.md → 'YouTube cookies' for the export steps.
+      - key: YTDLP_COOKIES_B64
+        sync: false
+
       # ── Sentry — leave blank to disable; SDK becomes a no-op
       - key: SENTRY_DSN
         sync: false
@@ -101,6 +108,8 @@ services:
         fromService: { type: web, name: smms-api, envVarKey: SENTRY_DSN }
       - key: SENTRY_TRACES_SAMPLE_RATE
         value: "0.1"
+      - key: YTDLP_COOKIES_B64
+        fromService: { type: web, name: smms-api, envVarKey: YTDLP_COOKIES_B64 }
       - key: REDIS_URL
         fromService: { type: redis, name: smms-redis, property: connectionString }
       - key: QUEUE_BROKER_URL
@@ -162,6 +171,11 @@ services:
       # silences alerts rather than breaking the worker.
       - key: SMMS_ALERTS_SLACK_URL
         sync: false
+      # Used by MediaImportService when yt-dlp hits YouTube's bot gate.
+      # Inherit from the API service so a single env-var edit propagates
+      # to every compute path that runs media imports.
+      - key: YTDLP_COOKIES_B64
+        fromService: { type: web, name: smms-api, envVarKey: YTDLP_COOKIES_B64 }
       # Same Redis the API uses — keeps cache + per-org rate-limit state
       # consistent across processes.
       - key: REDIS_URL

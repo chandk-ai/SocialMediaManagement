@@ -213,6 +213,52 @@ Pre-fix #80 follow-up. The DLQ writer didn't audit the terminal failure. Fixed b
 
 ---
 
+## YouTube cookies
+
+When `/media/import` (or the YouTube source plugin) returns:
+
+```
+yt-dlp failed: ERROR: [youtube] <id>: Sign in to confirm you're not a bot.
+```
+
+YouTube has flagged Render's datacenter IP and is requiring an
+authenticated session. Fix by giving yt-dlp a logged-in cookies file:
+
+1. **Open YouTube in Chrome** while signed in as the account that owns
+   the videos you want to download. Browse to any video to make sure
+   the session is active.
+2. **Install the "Get cookies.txt LOCALLY" extension** (Chrome Web
+   Store — open-source, MIT-licensed, no telemetry). The blessed one
+   is by Rahul Shaw — verify the publisher before installing. Firefox
+   users: the equivalent is called "cookies.txt".
+3. With the YouTube tab focused, click the extension icon → **Export
+   → Netscape format → Save**. You'll get a `cookies.txt` file with a
+   handful of `.youtube.com` rows.
+4. **Base64-encode it** so it travels cleanly through Render's env-var
+   plumbing:
+
+   ```bash
+   base64 -i ~/Downloads/cookies.txt | pbcopy        # macOS
+   # or
+   base64 -w0 cookies.txt | xclip -selection c       # Linux
+   ```
+
+5. **Paste into Render**: Dashboard → `smms-api` → Environment →
+   `YTDLP_COOKIES_B64` → Save. The Blueprint inherits this to
+   `smms-worker` and `smms-jobs-worker` automatically (`fromService`
+   wiring).
+6. **Trigger a redeploy** so the workers pick up the new env. Test
+   with a `POST /media/import` of any YouTube URL.
+
+The cookies are written to a per-request temp file (`/tmp/smms-import-*/cookies.txt`)
+and the temp dir is wiped after each call — they never persist on
+disk. Cookies last ~6 months before YouTube rotates the session; when
+that happens, repeat steps 1–6.
+
+If you don't want to use cookies, the service falls back to iOS and
+Android player clients (which sometimes bypass the bot gate without
+auth) before giving up. It's less reliable but zero-config.
+
 ## Useful one-liners
 
 ```bash

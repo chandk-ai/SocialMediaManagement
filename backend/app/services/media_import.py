@@ -243,6 +243,20 @@ class MediaImportService:
         (because the host serves HTML, not bytes). Re-hosts in Supabase
         so platforms can fetch the resulting MP4 directly.
 
+        YouTube specifically aggressively blocks datacenter IPs in 2024+
+        with "Sign in to confirm you're not a bot." gates. We work
+        around this two ways:
+
+          1. **Cookies** — operator sets ``YTDLP_COOKIES_B64`` (base64
+             of a Netscape-format cookies.txt exported from their
+             logged-in browser) and yt-dlp authenticates as that user.
+             Works indefinitely until the session cookie rotates.
+
+          2. **Player-client fallback** — when no cookies are set, try
+             the ``ios`` and ``android`` player clients which sometimes
+             bypass web's bot-gate without auth. Less reliable but
+             zero-config.
+
         yt-dlp + ffmpeg must be installed on the worker. We import
         lazily so the rest of the service still works on slimmed
         deployments that excluded them."""
@@ -254,8 +268,9 @@ class MediaImportService:
             ) from exc
 
         tmpdir = Path(tempfile.mkdtemp(prefix="smms-import-"))
+        cookies_path = _materialize_cookies_file(tmpdir)
         try:
-            ydl_opts = {
+            base_opts = {
                 "outtmpl": str(tmpdir / "%(id)s.%(ext)s"),
                 "format": (
                     f"b[ext=mp4][height<={max_height}][filesize<100M]/"
@@ -269,24 +284,74 @@ class MediaImportService:
                 "ratelimit": 5 * 1024 * 1024,
                 "max_filesize": MAX_BYTES,
                 "retries": 2,
+                # A real browser user-agent reduces 403 / bot-gate rate
+                # on every host that fingerprints requests.
+                "http_headers": {
+                    "User-Agent": (
+                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                        "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                        "Version/17.0 Safari/605.1.15"
+                    ),
+                },
             }
+            if cookies_path:
+                base_opts["cookiefile"] = str(cookies_path)
 
-            def _do() -> dict:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                    fp = ""
-                    for d in info.get("requested_downloads", []) or []:
-                        fp = d.get("filepath") or fp
-                    if not fp:
-                        fp = ydl.prepare_filename(info)
-                    return {"filepath": fp, "title": info.get("title", "")}
+            # Try strategies in order. Each entry layers on top of
+            # base_opts; we stop as soon as one returns a file.
+            #
+            #   1. Authenticated (cookies) — only attempted if available.
+            #   2. iOS player — historically the most lenient anonymous
+            #      path on YouTube.
+            #   3. Android player — second-best anonymous path.
+            #   4. Default (web) — last resort; will hit the bot gate
+            #      for most YouTube URLs but works on TikTok / Vimeo /
+            #      direct MP4 hosts.
+            strategies: list[tuple[str, dict]] = []
+            if cookies_path:
+                strategies.append(("cookies", {}))
+            strategies.append((
+                "ios",
+                {"extractor_args": {"youtube": {"player_client": ["ios"]}}},
+            ))
+            strategies.append((
+                "android",
+                {"extractor_args": {"youtube": {"player_client": ["android"]}}},
+            ))
+            strategies.append(("web", {}))
 
-            try:
-                result = await asyncio.to_thread(_do)
-            except Exception as exc:                                  # noqa: BLE001
-                raise MediaImportError(f"yt-dlp failed: {exc}") from exc
+            last_error: Exception | None = None
+            result_dict: dict | None = None
+            for name, override in strategies:
+                opts = {**base_opts, **override}
+                try:
+                    result_dict = await asyncio.to_thread(
+                        _run_ytdlp, yt_dlp, opts, url,
+                    )
+                    log.info("ytdlp_strategy_succeeded",
+                             strategy=name, url=url[:120])
+                    break
+                except Exception as exc:                              # noqa: BLE001
+                    last_error = exc
+                    log.info("ytdlp_strategy_failed",
+                             strategy=name, error=str(exc)[:200])
 
-            fp = Path(result["filepath"])
+            if result_dict is None:
+                # Surface a user-friendly hint when the failure pattern
+                # matches YouTube's bot gate, so the operator knows the
+                # remedy is "paste cookies" not "retry".
+                msg = str(last_error) if last_error else "all strategies failed"
+                hint = ""
+                if "Sign in to confirm" in msg or "not a bot" in msg:
+                    hint = (
+                        " — YouTube blocked the datacenter IP. Set the "
+                        "YTDLP_COOKIES_B64 env var to a base64-encoded "
+                        "cookies.txt exported from a logged-in browser "
+                        "(see docs/RUNBOOK.md → 'YouTube cookies')."
+                    )
+                raise MediaImportError(f"yt-dlp failed: {msg}{hint}")
+
+            fp = Path(result_dict["filepath"])
             if not fp.exists():
                 raise MediaImportError(
                     "yt-dlp reported success but file is missing.",
@@ -300,7 +365,7 @@ class MediaImportService:
                 )
 
             name = (
-                _SAFE_NAME_RE.sub("_", title_hint or result["title"])[:60] + ".mp4"
+                _SAFE_NAME_RE.sub("_", title_hint or result_dict["title"])[:60] + ".mp4"
             )
             data = fp.read_bytes()
             return await self.import_bytes(
@@ -310,6 +375,52 @@ class MediaImportService:
             )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _run_ytdlp(yt_dlp_mod, opts: dict, url: str) -> dict:
+    """Single yt-dlp run — extract the filepath / title from whatever
+    shape yt-dlp returns. Hoisted out of the async wrapper so it can
+    be ``asyncio.to_thread``'d cleanly."""
+    with yt_dlp_mod.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        fp = ""
+        for d in info.get("requested_downloads", []) or []:
+            fp = d.get("filepath") or fp
+        if not fp:
+            fp = ydl.prepare_filename(info)
+        return {"filepath": fp, "title": info.get("title", "")}
+
+
+def _materialize_cookies_file(tmpdir: Path) -> Path | None:
+    """If ``YTDLP_COOKIES_B64`` is set, decode + write a Netscape-
+    format cookies.txt into the temp dir and return its path. Returns
+    None when no cookies are configured.
+
+    Why base64 in an env var rather than a file on disk: Render's
+    deploy artifact is a Docker image — there's no persistent FS for
+    a cookies.txt that survives rebuilds. An env var travels with the
+    service and rotates cleanly. Operators export cookies via the
+    'Get cookies.txt LOCALLY' Chrome / Firefox extension and run
+    ``base64 -i cookies.txt | pbcopy`` to copy the value.
+    """
+    import base64
+    import os
+
+    encoded = os.getenv("YTDLP_COOKIES_B64", "").strip()
+    if not encoded:
+        return None
+    try:
+        raw = base64.b64decode(encoded)
+    except Exception as exc:                                          # noqa: BLE001
+        log.warning("ytdlp_cookies_decode_failed", error=str(exc))
+        return None
+    path = tmpdir / "cookies.txt"
+    try:
+        path.write_bytes(raw)
+    except OSError as exc:
+        log.warning("ytdlp_cookies_write_failed", error=str(exc))
+        return None
+    return path
 
 
 # ── Helpers ─────────────────────────────────────────────────────────
