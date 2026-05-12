@@ -26,7 +26,10 @@ from app.services.media_import import (
     MAX_BYTES,
     MediaImportError,
     MediaImportService,
+    _safe_org_path,
+    _sniff_mime_from_name,
 )
+from app.infrastructure.supabase.storage import SupabaseStorage
 
 log = get_logger(__name__)
 router = APIRouter()
@@ -86,6 +89,96 @@ async def upload_media(
     except MediaImportError as exc:
         raise HTTPException(status_code=415, detail=str(exc)) from exc
     return _to_out(result)
+
+
+# ── POST /media/signed-upload — direct-to-Supabase escape hatch ────────
+class SignedUploadIn(BaseModel):
+    filename: str
+    content_type: str = "application/octet-stream"
+
+
+class SignedUploadOut(BaseModel):
+    signed_url: str = Field(
+        description="PUT the file body here; valid for ~2 hours.",
+    )
+    public_url: str = Field(
+        description="The permanent public URL the post should reference "
+                    "after the PUT completes successfully.",
+    )
+    storage_path: str
+    content_type: str
+
+
+# Allowed mime list mirrors MediaImportService — keep them in sync if
+# either changes. Pre-validating here means the user gets a clean 415
+# instead of a Supabase rejection mid-upload.
+_SIGNED_UPLOAD_ALLOWED_MIMES = {
+    "image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif",
+    "video/mp4", "video/quicktime",
+}
+
+
+@router.post("/signed-upload", response_model=SignedUploadOut)
+async def signed_upload(
+    body: SignedUploadIn,
+    user: Principal = Depends(current_user),
+) -> SignedUploadOut:
+    """Get a short-lived Supabase signed upload URL the browser can
+    PUT a file to directly. This is the preferred path for any file
+    over ~4 MB because the file bytes never traverse our backend (no
+    memory cost) and never go through the Vercel proxy (no 4.5 MB
+    cap). Smaller files can still use ``POST /media/upload`` for
+    simplicity.
+
+    The frontend flow:
+      1. POST here with ``{filename, content_type}``  — tiny JSON,
+         fits through any proxy.
+      2. ``PUT signed_url`` with the file body (and the correct
+         ``Content-Type`` header).
+      3. After 200, use ``public_url`` as the post's media URL.
+
+    Validation here is intentionally loose — we trust the client
+    less than the Storage server. We pre-flight the mime against
+    our allow-list so the user sees a clean error if their file
+    type is unsupported; size enforcement happens at the Supabase
+    bucket level (``file_size_limit``), not here.
+    """
+    if not user.role.can_edit():
+        raise HTTPException(status_code=403, detail="Editor role required")
+
+    ct = (body.content_type or "application/octet-stream").lower().split(";")[0].strip()
+    if ct not in _SIGNED_UPLOAD_ALLOWED_MIMES:
+        # Same fallback as the buffered upload: macOS / iPhone often
+        # mis-reports content_type; sniff from filename before giving up.
+        sniffed = _sniff_mime_from_name(body.filename or "")
+        if sniffed in _SIGNED_UPLOAD_ALLOWED_MIMES:
+            ct = sniffed
+        else:
+            raise HTTPException(
+                status_code=415,
+                detail=(
+                    f"Unsupported media type {ct!r}. "
+                    f"Allowed: {sorted(_SIGNED_UPLOAD_ALLOWED_MIMES)}."
+                ),
+            )
+
+    path = _safe_org_path(user.org_id, body.filename or "asset")
+    storage = SupabaseStorage()
+    try:
+        result = await storage.create_signed_upload_url(path)
+    except Exception as exc:                                          # noqa: BLE001
+        log.exception("signed_upload_url_failed", path=path)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not create signed upload URL: {exc}",
+        ) from exc
+
+    return SignedUploadOut(
+        signed_url=result["signed_url"],
+        public_url=result["public_url"],
+        storage_path=result["storage_path"],
+        content_type=ct,
+    )
 
 
 # ── POST /media/import — YouTube / TikTok / direct URL → MP4 ───────────

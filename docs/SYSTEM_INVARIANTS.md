@@ -119,10 +119,19 @@ prose belongs in module docstrings; this file is a checklist.
     key for content-type varies by version and silently dropping it
     causes Supabase to default to `text/plain` and reject.
 
-* **Frontend multipart uploads bypass the Vercel proxy** by hitting
-  `NEXT_PUBLIC_BACKEND_URL` directly. Vercel serverless functions
-  cap request bodies at 4.5 MB on Hobby plan. Any new file-upload
-  path must reuse `api.postForm` (not `api.post`).
+* **Frontend file uploads use the signed-URL path** (`POST
+  /media/signed-upload` → direct PUT to Supabase). This bypasses
+  both the Vercel proxy (4.5 MB cap, fundamentally broken for
+  binary multipart) AND the Render backend's memory. The buffered
+  `POST /media/upload` route still exists for small images and
+  legacy callers but **must not** be used from the frontend file
+  picker. Direct-PUT URL is bound to a single bucket path with a
+  ~2-hour TTL token — leaks expire harmlessly.
+
+* **`NEXT_PUBLIC_*` env vars are inlined at build time, not
+  runtime.** Setting them in Vercel doesn't take effect until the
+  next deploy. If you add one, trigger Deployments → ⋯ → Redeploy
+  manually — Vercel doesn't auto-rebuild on env-var edits.
 
 ## Audit log
 

@@ -268,10 +268,48 @@ function EditDialog({ post, swrKey, onClose }: {
     setActiveRow(null);
     setUploadErr(null);
     try {
-      const fd = new FormData();
-      fd.append('file', file);
-      const out = await api.postForm<UploadOut>('/media/upload', fd);
-      updateMedia(idx, { url: out.url, kind: out.kind });
+      // Signed-URL flow: ask the backend for a short-lived Supabase
+      // upload URL (tiny JSON request, passes through any proxy),
+      // then PUT the file DIRECTLY to Supabase. No file bytes ever
+      // traverse Vercel's proxy (4.5 MB cap) or our Render backend
+      // (memory cost). Works for files up to the bucket's 500 MB
+      // file_size_limit.
+      const signed = await api.post<{
+        signed_url: string;
+        public_url: string;
+        storage_path: string;
+        content_type: string;
+      }>('/media/signed-upload', {
+        filename: file.name,
+        content_type: file.type || 'application/octet-stream',
+      });
+
+      // Direct PUT to Supabase. We send Content-Type explicitly so
+      // the Storage server records it correctly on the object — the
+      // bucket's mime allow-list checks this header. Match the value
+      // the backend already validated.
+      const putRes = await fetch(signed.signed_url, {
+        method: 'PUT',
+        body: file,
+        headers: {
+          'Content-Type': signed.content_type,
+          // Don't accidentally clobber an existing object at the
+          // same key — the path always includes a fresh UUID so
+          // collisions are essentially impossible, but defense in
+          // depth is cheap here.
+          'x-upsert': 'false',
+        },
+      });
+      if (!putRes.ok) {
+        const body = await putRes.text();
+        throw new Error(
+          `Direct upload to Supabase failed (${putRes.status}): ${body.slice(0, 200)}`,
+        );
+      }
+
+      const kind: 'image' | 'video' =
+        signed.content_type.startsWith('video/') ? 'video' : 'image';
+      updateMedia(idx, { url: signed.public_url, kind });
     } catch (e) {
       const ae = e as ApiError;
       setUploadErr(ae?.detail || (e as Error)?.message || 'Upload failed.');

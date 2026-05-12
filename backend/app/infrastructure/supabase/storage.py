@@ -140,3 +140,77 @@ class SupabaseStorage:
         def _do() -> Any:
             return client.storage.from_(self.bucket).remove(paths)
         await asyncio.to_thread(_do)
+
+    async def create_signed_upload_url(self, path: str) -> dict[str, str]:
+        """Generate a short-lived URL the frontend can PUT a file to,
+        bypassing our backend entirely. Used for large media uploads
+        where buffering the bytes through FastAPI (and through the
+        Vercel proxy in front of it) would exceed body-size limits.
+
+        Returns:
+            ``{signed_url, public_url, storage_path}`` —
+
+            * ``signed_url``  — URL to PUT the file bytes to. Includes
+              an embedded auth token in the path; valid for ~2 hours.
+            * ``public_url``  — the permanent post-upload URL the post
+              can reference. Matches what ``public_url(path)`` returns
+              and is valid once the PUT completes successfully.
+            * ``storage_path`` — the key inside the bucket. Caller
+              records it for housekeeping (delete on post deletion,
+              etc.).
+
+        Auth: we use the service-role key here, which has full write
+        access to the bucket. The signed URL it produces is bound to
+        the specific path — the frontend can't use it to write
+        elsewhere. The token in the URL is short-lived so a leaked
+        signed URL stops working before it can be exploited.
+        """
+        base = self.settings.supabase.url.rstrip("/")
+        service_key_raw = self.settings.supabase.service_role_key
+        service_key = (
+            service_key_raw.get_secret_value()
+            if hasattr(service_key_raw, "get_secret_value")
+            else str(service_key_raw)
+        )
+        url = f"{base}/storage/v1/object/upload/sign/{self.bucket}/{path}"
+        headers = {
+            "Authorization": f"Bearer {service_key}",
+            "apikey": service_key,
+        }
+
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.post(url, headers=headers)
+            if r.status_code >= 400:
+                try:
+                    detail = r.json()
+                except Exception:                                     # noqa: BLE001
+                    detail = r.text[:500]
+                raise RuntimeError(
+                    f"Supabase signed-upload-URL request failed: {detail}"
+                )
+            data = r.json() or {}
+
+        # Supabase returns ``{url, token}`` (the ``url`` is already a
+        # full URL with the token embedded, so callers usually just
+        # need that — we expose both for flexibility / debugging).
+        # ``data["url"]`` looks like: /storage/v1/object/upload/sign/{bucket}/{path}?token=...
+        # — it may be relative. Resolve to absolute so the browser can
+        # PUT it without further work.
+        signed_path = data.get("url") or ""
+        if signed_path.startswith("/"):
+            signed_url = f"{base}{signed_path}"
+        elif signed_path.startswith("http"):
+            signed_url = signed_path
+        else:
+            # Fallback: construct the URL ourselves from the token
+            token = data.get("token") or ""
+            signed_url = (
+                f"{base}/storage/v1/object/upload/sign/"
+                f"{self.bucket}/{path}?token={token}"
+            )
+
+        return {
+            "signed_url": signed_url,
+            "public_url": self.public_url(path),
+            "storage_path": path,
+        }
