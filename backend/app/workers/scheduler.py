@@ -86,56 +86,80 @@ async def _tick_async() -> int:
     enqueued = 0
     pairs = await list_active()
     for org_id, wf in pairs:
-        if _is_due(wf, now):
-            run_task.delay(str(org_id), str(wf.id))
-            log.info("scheduler_enqueued",
-                     workflow_id=str(wf.id),
-                     org_id=str(org_id),
-                     kind=wf.schedule.kind.value)
-            enqueued += 1
+        if not _is_due(wf, now):
+            continue
 
-            # ONCE schedules need a "disarm" step or they'll fire on
-            # every subsequent tick (run_at <= now stays true forever).
-            # We disarm by clearing run_at — the workflow stays active,
-            # just with no more scheduled runs until the user reschedules
-            # via the UI. INTERVAL and CRON are self-spacing through
-            # their own time arithmetic so they don't need this guard.
-            if wf.schedule.kind is ScheduleKind.ONCE:
-                try:
-                    await _disarm_once_schedule(workflow_repo, org_id, wf)
-                except Exception as exc:                              # noqa: BLE001
-                    # Disarm failure is non-fatal — next tick would
-                    # double-fire, which is bad but recoverable, vs.
-                    # raising and breaking the whole tick.
-                    log.warning("scheduler_disarm_failed",
-                                workflow_id=str(wf.id), error=str(exc))
+        run_task.delay(str(org_id), str(wf.id))
+        log.info("scheduler_enqueued",
+                 workflow_id=str(wf.id),
+                 org_id=str(org_id),
+                 kind=wf.schedule.kind.value)
+        enqueued += 1
+
+        # Two post-fire bookkeeping concerns, in priority order:
+        #
+        # 1. **Stamp last_fired_at** — every kind needs this. Without
+        #    it _is_due() can't tell "first time" from "I've already
+        #    fired this minute" and the workflow would re-fire on
+        #    every subsequent tick until updated_at advanced for some
+        #    other reason. Applies to INTERVAL, CRON, OPTIMAL, ADAPTIVE.
+        #
+        # 2. **Disarm ONCE** — separate concern. A ONCE schedule has
+        #    semantically completed once it fires. We downgrade kind
+        #    to MANUAL so the UI shows the right state and the user
+        #    can rearm. (Just stamping last_fired_at is not enough
+        #    for ONCE because s.run_at is still ≤ now.)
+        try:
+            await _record_fired(workflow_repo, wf, now)
+        except Exception as exc:                                      # noqa: BLE001
+            log.warning("scheduler_record_fired_failed",
+                        workflow_id=str(wf.id), error=str(exc))
+
     log.info("scheduler_tick_done",
              active_workflows=len(pairs), enqueued=enqueued)
     return enqueued
 
 
-async def _disarm_once_schedule(repo, org_id, wf) -> None:
-    """A ``Schedule(kind=ONCE)`` requires ``run_at`` (per Schedule's
-    own validator), so we can't simply null the run_at field — the
-    value object would refuse to construct. We instead downgrade the
-    kind to MANUAL once consumed; the user can rearm via the UI by
-    picking a new date, which re-creates a fresh ONCE schedule.
+async def _record_fired(repo, wf, fired_at: datetime) -> None:
+    """Stamp ``last_fired_at`` so the next tick knows when this
+    workflow last fired, and for ONCE schedules also downgrade kind
+    to MANUAL so the UI shows the right state.
 
-    Why downgrade rather than mark-consumed with a flag: the Schedule
-    value object is intentionally minimal — adding a 'consumed_at'
-    field would propagate through every persistence layer + UI form.
-    MANUAL is the natural "no automatic runs" state and already exists.
+    Why this is one function: both writes happen in the same UPDATE
+    statement (one repo.update call), keeping the bookkeeping atomic.
+    A worker crash between the two would otherwise leave a ONCE
+    schedule still armed despite last_fired_at being set, then double-
+    fire on the next tick.
     """
     from app.domain.value_objects.schedule import Schedule, ScheduleKind
 
-    wf.schedule = Schedule(
-        kind=ScheduleKind.MANUAL,
-        cron=None,
-        interval_minutes=None,
-        run_at=None,
-        timezone=wf.schedule.timezone,
-    )
+    wf.last_fired_at = fired_at
+    if wf.schedule.kind is ScheduleKind.ONCE:
+        wf.schedule = Schedule(
+            kind=ScheduleKind.MANUAL,
+            cron=None,
+            interval_minutes=None,
+            run_at=None,
+            timezone=wf.schedule.timezone,
+        )
     await repo.update(wf)
+
+
+def _last_fire_anchor(wf: Workflow) -> datetime:
+    """The reference timestamp for "has enough time passed since the
+    workflow last fired?". Prefers ``last_fired_at`` (real fire time);
+    falls back to ``updated_at`` for workflows that have never fired
+    so the first eligibility check still happens at a sane moment.
+
+    Always returned tz-aware (UTC). Schedule comparisons elsewhere
+    in this module assume tz-aware datetimes — a naive comparison
+    would raise.
+    """
+    candidate = wf.last_fired_at or wf.updated_at
+    return (
+        candidate.replace(tzinfo=timezone.utc)
+        if candidate.tzinfo is None else candidate
+    )
 
 
 def _is_due(wf: Workflow, now: datetime) -> bool:
@@ -144,18 +168,40 @@ def _is_due(wf: Workflow, now: datetime) -> bool:
     s = wf.schedule
     if s.kind is ScheduleKind.MANUAL:
         return False
+
+    anchor = _last_fire_anchor(wf)
+
     if s.kind is ScheduleKind.ONCE:
-        return bool(s.run_at and s.run_at.replace(tzinfo=timezone.utc) <= now)
+        # ONCE: fire when run_at has passed AND we haven't fired yet
+        # (or last_fired_at predates run_at — a fresh re-arm).
+        if not s.run_at:
+            return False
+        run_at = (
+            s.run_at.replace(tzinfo=timezone.utc)
+            if s.run_at.tzinfo is None else s.run_at
+        )
+        if run_at > now:
+            return False
+        # If last_fired_at is set AND it's at-or-after the scheduled
+        # run_at, this ONCE has already been consumed. The scheduler
+        # also downgrades kind=MANUAL on consumption (see _record_fired)
+        # so this branch is belt-and-braces for the deploy window
+        # where last_fired_at is set but the kind transition hasn't
+        # propagated yet (e.g. an old worker still reading the row).
+        return not (wf.last_fired_at and wf.last_fired_at >= run_at)
+
     if s.kind is ScheduleKind.INTERVAL:
-        last = wf.updated_at.replace(tzinfo=timezone.utc)
-        return now - last >= timedelta(minutes=int(s.interval_minutes or 60))
+        return now - anchor >= timedelta(minutes=int(s.interval_minutes or 60))
+
     if s.kind is ScheduleKind.CRON:
-        return _cron_due(s.cron or "", wf.updated_at, now)
+        return _cron_due(s.cron or "", anchor, now)
+
     if s.kind.value == "optimal":
-        # The optimal scheduler is consulted lazily; if no slot is set we skip.
         return _optimal_due(wf, now)
+
     if s.kind.value == "adaptive":
         return _adaptive_due(wf, now)
+
     return False
 
 

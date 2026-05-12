@@ -166,6 +166,7 @@ def _workflow_to_domain(orm: WorkflowORM) -> Workflow:
         ),
         status=WorkflowStatus(orm.status),
         created_at=orm.created_at, updated_at=orm.updated_at,
+        last_fired_at=orm.last_fired_at,
     )
 
 
@@ -191,6 +192,7 @@ def _workflow_to_orm(d: Workflow) -> WorkflowORM:
             "run_at": d.schedule.run_at.isoformat() if d.schedule.run_at else None,
             "timezone": d.schedule.timezone,
         },
+        last_fired_at=d.last_fired_at,
     )
 
 

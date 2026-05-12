@@ -74,6 +74,10 @@ class WorkflowOut(APIModel):
     target_selector: TargetSelectorIn = Field(default_factory=TargetSelectorIn)
     created_at: datetime
     updated_at: datetime
+    # Surfacing last_fired_at on the API so the workflow card can show
+    # "Last run X" accurately for scheduled runs (today this only
+    # populates after a Manual or post-deploy scheduled fire).
+    last_fired_at: datetime | None = None
 
 
 class WorkflowRunOut(APIModel):

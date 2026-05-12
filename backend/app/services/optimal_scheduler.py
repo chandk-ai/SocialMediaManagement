@@ -61,9 +61,18 @@ class OptimalScheduler:
         plugins = list(workflow.target_selector.all_of_platforms) or ["default"]
         cold = _union_hours(plugins)
 
-        # Respect min_gap from the last firing.
-        last = workflow.updated_at.replace(tzinfo=timezone.utc) \
-                if workflow.updated_at.tzinfo is None else workflow.updated_at
+        # Respect min_gap from the LAST FIRE — not updated_at. Before
+        # the May 12 2026 fix updated_at was the only "last fire"
+        # signal, which meant OPTIMAL workflows that had been edited
+        # since the last fire would have an artificially-recent anchor
+        # and skip valid windows; conversely, workflows that hadn't
+        # been edited would re-fire every tick because updated_at
+        # never advanced past the first eligibility window.
+        last_raw = workflow.last_fired_at or workflow.updated_at
+        last = (
+            last_raw.replace(tzinfo=timezone.utc)
+            if last_raw.tzinfo is None else last_raw
+        )
         earliest = last + timedelta(minutes=workflow.schedule.min_gap_minutes)
         candidate = max(now, earliest)
 

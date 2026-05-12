@@ -7,6 +7,25 @@
 #   2. Render dashboard → New + → Blueprint → pick the repo → Apply
 #   3. Render reads this file, prompts you to fill the `sync: false`
 #      env vars (Supabase URL/keys + LLM key), creates everything.
+#
+# fromService vs sync:false — read this before editing.
+#
+#   * Use ``fromService`` ONLY for vars that are REQUIRED on the parent
+#     and that you want one-source-of-truth for. Supabase URL / keys
+#     / JWT secret / Redis URL all qualify — every service needs the
+#     same value, the parent's copy is mandatory, so `fromService`
+#     keeps them in sync.
+#
+#   * Use per-service ``sync: false`` for OPTIONAL vars whose absence
+#     is benign (Sentry, YouTube cookies, LLM provider keys you may
+#     not use). Render REFUSES Blueprint sync when a `fromService`
+#     reference points at a var that doesn't exist on the parent,
+#     and `sync: false` means "user-supplied — may be empty". A
+#     `fromService` to a sync:false-empty var blocks the whole sync
+#     even though the workers don't actually need it.
+#
+#   See docs/SYSTEM_INVARIANTS.md → "Celery / Worker topology" for
+#   the rationale. (Incident: May 12 2026.)
 
 services:
   # ── Managed Redis (Celery broker + result backend + rate-limit + state cache)
@@ -109,16 +128,19 @@ services:
         fromService: { type: web, name: smms-api, envVarKey: SUPABASE_JWT_SECRET }
       - key: SUPABASE_POSTGRES_CONNECTION_STRING
         fromService: { type: web, name: smms-api, envVarKey: SUPABASE_POSTGRES_CONNECTION_STRING }
+      # Optional secrets — per-service sync:false rather than
+      # fromService (see header comment for why). Paste the same value
+      # here as on smms-api if you want them; leave empty otherwise.
       - key: LLM_ANTHROPIC_API_KEY
-        fromService: { type: web, name: smms-api, envVarKey: LLM_ANTHROPIC_API_KEY }
+        sync: false
       - key: LLM_DEFAULT_PROVIDER
         value: anthropic
       - key: SENTRY_DSN
-        fromService: { type: web, name: smms-api, envVarKey: SENTRY_DSN }
+        sync: false
       - key: SENTRY_TRACES_SAMPLE_RATE
         value: "0.1"
       - key: YTDLP_COOKIES_B64
-        fromService: { type: web, name: smms-api, envVarKey: YTDLP_COOKIES_B64 }
+        sync: false
       - key: REDIS_URL
         fromService: { type: redis, name: smms-redis, property: connectionString }
       - key: QUEUE_BROKER_URL
@@ -166,12 +188,14 @@ services:
         fromService: { type: web, name: smms-api, envVarKey: SUPABASE_JWT_SECRET }
       - key: SUPABASE_POSTGRES_CONNECTION_STRING
         fromService: { type: web, name: smms-api, envVarKey: SUPABASE_POSTGRES_CONNECTION_STRING }
+      # Optional secrets — per-service sync:false (see header for why
+      # fromService doesn't work for vars that may be empty on the parent).
       - key: LLM_ANTHROPIC_API_KEY
-        fromService: { type: web, name: smms-api, envVarKey: LLM_ANTHROPIC_API_KEY }
+        sync: false
       - key: LLM_DEFAULT_PROVIDER
         value: anthropic
       - key: SENTRY_DSN
-        fromService: { type: web, name: smms-api, envVarKey: SENTRY_DSN }
+        sync: false
       - key: SENTRY_TRACES_SAMPLE_RATE
         value: "0.1"
       # Slack alerts — independent of the API since you may want
@@ -181,10 +205,11 @@ services:
       - key: SMMS_ALERTS_SLACK_URL
         sync: false
       # Used by MediaImportService when yt-dlp hits YouTube's bot gate.
-      # Inherit from the API service so a single env-var edit propagates
-      # to every compute path that runs media imports.
+      # Per-service sync:false rather than fromService because cookies
+      # are optional — workers fall back to iOS/Android player clients
+      # when no cookies are set.
       - key: YTDLP_COOKIES_B64
-        fromService: { type: web, name: smms-api, envVarKey: YTDLP_COOKIES_B64 }
+        sync: false
       # Same Redis the API uses — keeps cache + per-org rate-limit state
       # consistent across processes.
       - key: REDIS_URL
@@ -215,8 +240,9 @@ services:
         fromService: { type: web, name: smms-api, envVarKey: SUPABASE_JWT_SECRET }
       - key: SUPABASE_POSTGRES_CONNECTION_STRING
         fromService: { type: web, name: smms-api, envVarKey: SUPABASE_POSTGRES_CONNECTION_STRING }
+      # Optional — per-service sync:false (see header for the why).
       - key: SENTRY_DSN
-        fromService: { type: web, name: smms-api, envVarKey: SENTRY_DSN }
+        sync: false
       - key: SENTRY_TRACES_SAMPLE_RATE
         value: "0.1"
       - key: REDIS_URL

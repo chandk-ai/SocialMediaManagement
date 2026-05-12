@@ -133,6 +133,14 @@ class WorkflowORM(Base):
     schedule: Mapped[dict] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Stamped by the scheduler tick after each fire. Used by _is_due()
+    # as the base for CRON / INTERVAL / OPTIMAL "has enough time passed?"
+    # checks. NULL means "never fired" — _is_due() falls back to
+    # updated_at to anchor the first eligibility check, then stamps
+    # this on the first actual fire.
+    last_fired_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
 
 
 class WorkflowRunORM(Base):

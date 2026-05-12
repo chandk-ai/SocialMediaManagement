@@ -75,6 +75,12 @@ class Workflow:
     status: WorkflowStatus = WorkflowStatus.DRAFT
     created_at: datetime = field(default_factory=datetime.utcnow)
     updated_at: datetime = field(default_factory=datetime.utcnow)
+    # Set by the scheduler tick after a successful firing. Schedulers
+    # read this (not updated_at) to decide whether enough time has
+    # passed for the next CRON / INTERVAL / OPTIMAL firing. NULL until
+    # the first fire — _is_due() falls back to updated_at then, so
+    # newly-saved workflows still fire on schedule.
+    last_fired_at: datetime | None = None
 
     def activate(self) -> None:
         # Sources are optional — a trigger-driven workflow can run on the
