@@ -11,6 +11,7 @@ import httpx
 
 from app.plugins.registry import register_plugin
 
+from .anthropic import _mock_fallback_allowed
 from .base import LLMProvider, LLMRequest, LLMResponse, LLMUsage
 
 
@@ -53,8 +54,10 @@ class HuggingFaceProvider(LLMProvider):
                 r.raise_for_status()
                 data = r.json()
         except (httpx.HTTPError, ValueError):
-            from .anthropic import _mock_response
-            return _mock_response(req, self.model, "huggingface")
+            if _mock_fallback_allowed():
+                from .anthropic import _mock_response
+                return _mock_response(req, self.model, "huggingface")
+            raise
 
         text = ""
         if isinstance(data, list) and data:

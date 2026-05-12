@@ -8,7 +8,11 @@ import httpx
 
 from app.plugins.registry import register_plugin
 
-from .base import LLMProvider, LLMRequest, LLMResponse, LLMUsage
+from .anthropic import _mock_fallback_allowed
+from .base import (
+    LLMProvider, LLMRequest, LLMResponse, LLMUsage,
+    MissingLLMCredentialError,
+)
 
 
 @register_plugin("llm", "azure_openai", api_version="1.0", category="hosted")
@@ -30,8 +34,15 @@ class AzureOpenAIProvider(LLMProvider):
 
     async def complete(self, req: LLMRequest) -> LLMResponse:
         if not (self.endpoint and self.deployment and self.api_key):
-            from .anthropic import _mock_response
-            return _mock_response(req, self.deployment or self.default_model, "azure_openai")
+            if _mock_fallback_allowed():
+                from .anthropic import _mock_response
+                return _mock_response(
+                    req, self.deployment or self.default_model, "azure_openai",
+                )
+            raise MissingLLMCredentialError(
+                "azure_openai",
+                env_var="LLM_AZURE_ENDPOINT / LLM_AZURE_DEPLOYMENT / LLM_AZURE_API_KEY",
+            )
         url = (
             f"{self.endpoint}/openai/deployments/{self.deployment}"
             f"/chat/completions?api-version={self.api_version}"
@@ -51,8 +62,10 @@ class AzureOpenAIProvider(LLMProvider):
                 r.raise_for_status()
                 data = r.json()
         except (httpx.HTTPError, ValueError):
-            from .anthropic import _mock_response
-            return _mock_response(req, self.deployment, "azure_openai")
+            if _mock_fallback_allowed():
+                from .anthropic import _mock_response
+                return _mock_response(req, self.deployment, "azure_openai")
+            raise
         text = (data["choices"][0]["message"]["content"] or "").strip()
         u = data.get("usage", {})
         return LLMResponse(

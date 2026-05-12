@@ -7,7 +7,11 @@ from typing import Any
 from app.core.logging import get_logger
 from app.plugins.registry import register_plugin
 
-from .base import LLMProvider, LLMRequest, LLMResponse, LLMUsage
+from .anthropic import _mock_fallback_allowed
+from .base import (
+    LLMProvider, LLMRequest, LLMResponse, LLMUsage,
+    MissingLLMCredentialError,
+)
 
 log = get_logger(__name__)
 
@@ -30,8 +34,12 @@ class OpenAIProvider(LLMProvider):
     async def complete(self, req: LLMRequest) -> LLMResponse:
         model = req.model or self.default_model
         if self._client is None:
-            from .anthropic import _mock_response
-            return _mock_response(req, model, "openai")
+            if _mock_fallback_allowed():
+                from .anthropic import _mock_response
+                return _mock_response(req, model, "openai")
+            raise MissingLLMCredentialError(
+                "openai", env_var="LLM_OPENAI_API_KEY",
+            )
         msgs = []
         if req.system:
             msgs.append({"role": "system", "content": req.system})

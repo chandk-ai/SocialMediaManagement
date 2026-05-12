@@ -6,6 +6,30 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, ClassVar
 
 
+class LLMProviderError(Exception):
+    """Base class for provider-level failures the orchestrator should
+    surface to the user (vs. transient network glitches the worker
+    retries automatically)."""
+
+
+class MissingLLMCredentialError(LLMProviderError):
+    """Raised when a hosted LLM provider is invoked without an API key
+    (and the install isn't running in explicit-mock mode). This is a
+    *permanent* config error — the worker should fail the run with a
+    clear message instead of producing junk drafts via the mock path."""
+
+    def __init__(self, provider: str, env_var: str | None = None) -> None:
+        self.provider = provider
+        self.env_var = env_var
+        msg = f"No API key configured for LLM provider '{provider}'."
+        if env_var:
+            msg += (f" Set {env_var} (or store the key per-org via "
+                    f"Settings → LLM credentials).")
+        else:
+            msg += " Store the key per-org via Settings → LLM credentials."
+        super().__init__(msg)
+
+
 @dataclass(frozen=True, slots=True)
 class LLMUsage:
     input_tokens: int

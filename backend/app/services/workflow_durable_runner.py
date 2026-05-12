@@ -246,6 +246,28 @@ class DurableWorkflowRunner:
             await self.run_repo.update(run)
             raise
         except Exception as exc:                                     # noqa: BLE001
+            # Translate missing-LLM-credential errors into a clean
+            # FAILED state with an actionable message. These are
+            # permanent (no key won't appear via retry), so we also
+            # raise PermanentError so the worker DLQs the job instead
+            # of retrying 5x against the same broken config.
+            from app.adapters.llm.base import MissingLLMCredentialError
+            if isinstance(exc, MissingLLMCredentialError):
+                run.transition(RunStatus.FAILED)
+                run.error = (
+                    f"LLM credentials missing for provider "
+                    f"'{exc.provider}'. Add the key under "
+                    f"Settings → LLM credentials and re-run."
+                )
+                run.append(AgentTraceEvent(
+                    agent="runner", event="llm_credentials_missing",
+                    payload={"provider": exc.provider,
+                             "env_var": exc.env_var,
+                             "phase": phase},
+                ))
+                await self.run_repo.update(run)
+                raise PermanentError(str(exc)) from exc
+
             run.append(AgentTraceEvent(
                 agent="runner", event=f"phase_{phase}_failed",
                 payload={"error": str(exc)[:1000]},

@@ -7,7 +7,11 @@ from typing import Any
 
 from app.plugins.registry import register_plugin
 
-from .base import LLMProvider, LLMRequest, LLMResponse, LLMUsage
+from .anthropic import _mock_fallback_allowed
+from .base import (
+    LLMProvider, LLMRequest, LLMResponse, LLMUsage,
+    MissingLLMCredentialError,
+)
 
 
 @register_plugin("llm", "bedrock", api_version="1.0", category="hosted")
@@ -27,8 +31,13 @@ class BedrockProvider(LLMProvider):
 
     async def complete(self, req: LLMRequest) -> LLMResponse:
         if self._client is None:
-            from .anthropic import _mock_response
-            return _mock_response(req, self.model, "bedrock")
+            if _mock_fallback_allowed():
+                from .anthropic import _mock_response
+                return _mock_response(req, self.model, "bedrock")
+            raise MissingLLMCredentialError(
+                "bedrock",
+                env_var="boto3 not installed or AWS credentials not configured",
+            )
 
         # Anthropic-shaped body works for Claude models on Bedrock; for other
         # model families adjust accordingly.

@@ -8,7 +8,11 @@ import httpx
 
 from app.plugins.registry import register_plugin
 
-from .base import LLMProvider, LLMRequest, LLMResponse, LLMUsage
+from .anthropic import _mock_fallback_allowed
+from .base import (
+    LLMProvider, LLMRequest, LLMResponse, LLMUsage,
+    MissingLLMCredentialError,
+)
 
 
 @register_plugin("llm", "gemini", api_version="1.0", category="hosted")
@@ -22,8 +26,12 @@ class GeminiProvider(LLMProvider):
 
     async def complete(self, req: LLMRequest) -> LLMResponse:
         if not self.api_key:
-            from .anthropic import _mock_response
-            return _mock_response(req, self.model, "gemini")
+            if _mock_fallback_allowed():
+                from .anthropic import _mock_response
+                return _mock_response(req, self.model, "gemini")
+            raise MissingLLMCredentialError(
+                "gemini", env_var="LLM_GEMINI_API_KEY",
+            )
         url = (
             "https://generativelanguage.googleapis.com/v1beta/models/"
             f"{self.model}:generateContent?key={self.api_key}"
@@ -46,8 +54,10 @@ class GeminiProvider(LLMProvider):
                 r.raise_for_status()
                 data = r.json()
         except (httpx.HTTPError, ValueError):
-            from .anthropic import _mock_response
-            return _mock_response(req, self.model, "gemini")
+            if _mock_fallback_allowed():
+                from .anthropic import _mock_response
+                return _mock_response(req, self.model, "gemini")
+            raise  # let the worker retry / DLQ — don't fake content.
 
         text = ""
         try:

@@ -14,6 +14,7 @@ import httpx
 from app.core.logging import get_logger
 from app.plugins.registry import register_plugin
 
+from .anthropic import _mock_fallback_allowed
 from .base import LLMProvider, LLMRequest, LLMResponse, LLMUsage
 
 log = get_logger(__name__)
@@ -57,8 +58,10 @@ class OllamaProvider(LLMProvider):
                 r.raise_for_status()
                 data = r.json()
         except (httpx.HTTPError, ValueError):
-            from .anthropic import _mock_response
-            return _mock_response(req, model, "ollama")
+            if _mock_fallback_allowed():
+                from .anthropic import _mock_response
+                return _mock_response(req, model, "ollama")
+            raise
 
         text = (data.get("message", {}).get("content") or "").strip()
         usage = LLMUsage(

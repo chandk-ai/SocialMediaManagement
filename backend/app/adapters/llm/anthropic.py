@@ -1,5 +1,17 @@
-"""Anthropic Claude provider — uses the official SDK when an API key is set,
-falls back to a deterministic mock otherwise so the system runs out of the box.
+"""Anthropic Claude provider — uses the official SDK when an API key is set.
+
+Behavior when no API key is configured:
+  * In normal runs the call raises ``MissingLLMCredentialError`` so the
+    workflow lands in FAILED with an actionable error message. This
+    replaces the old silent fallback to a "[mock anthropic] ..." string
+    which produced meaningless drafts.
+  * In environments that set ``LLM_ALLOW_MOCK_FALLBACK=1`` (legacy
+    demos / smoke tests) the old mock path is preserved so existing
+    fixtures keep working.
+
+The dedicated ``mock`` provider (``llm/mock.py``) is still available for
+deterministic tests — it's selected explicitly via workflow config, not
+by accident through a missing key.
 """
 from __future__ import annotations
 
@@ -9,9 +21,19 @@ from typing import Any
 from app.core.logging import get_logger
 from app.plugins.registry import register_plugin
 
-from .base import LLMProvider, LLMRequest, LLMResponse, LLMUsage
+from .base import (
+    LLMProvider, LLMRequest, LLMResponse, LLMUsage,
+    MissingLLMCredentialError,
+)
 
 log = get_logger(__name__)
+
+
+def _mock_fallback_allowed() -> bool:
+    """Opt-in escape hatch for legacy smoke tests and demos. Off in prod."""
+    return os.getenv("LLM_ALLOW_MOCK_FALLBACK", "0").lower() in (
+        "1", "true", "yes", "on",
+    )
 
 
 @register_plugin("llm", "anthropic", api_version="1.0")
@@ -32,7 +54,11 @@ class AnthropicProvider(LLMProvider):
     async def complete(self, req: LLMRequest) -> LLMResponse:
         model = req.model or self.default_model
         if self._client is None:
-            return _mock_response(req, model, "anthropic")
+            if _mock_fallback_allowed():
+                return _mock_response(req, model, "anthropic")
+            raise MissingLLMCredentialError(
+                "anthropic", env_var="LLM_ANTHROPIC_API_KEY",
+            )
         msg = await self._client.messages.create(
             model=model,
             max_tokens=req.max_tokens,
