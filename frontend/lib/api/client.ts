@@ -116,11 +116,30 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return (await res.json()) as T;
 }
 
+// Direct backend URL used by multipart uploads ONLY. Vercel serverless
+// functions cap request bodies at 4.5 MB (Hobby plan) and even smaller
+// on free tier — every regular API call routes through /api/proxy which
+// re-buffers the body in the function, hitting that ceiling. Multipart
+// file uploads above ~4 MB therefore have to skip the proxy and POST
+// straight to the Render backend, which has a 500 MB ceiling.
+//
+// Set ``NEXT_PUBLIC_BACKEND_URL`` in Vercel → it's exposed to the
+// browser at build time so the upload knows where to go. The token
+// still travels in the Authorization header so the backend can verify
+// it against SUPABASE_JWT_SECRET; the FastAPI CORSMiddleware already
+// allows the frontend's origin.
+const DIRECT_BACKEND = (
+  (typeof process !== 'undefined' && process.env.NEXT_PUBLIC_BACKEND_URL)
+    || ''
+).replace(/\/+$/, '');
+
 async function requestForm<T>(path: string, form: FormData): Promise<T> {
   // Don't set Content-Type — the browser sets multipart/form-data with
   // the right ``boundary`` automatically when you pass a FormData.
   // Reuse the same auth/error-handling shape as the JSON path.
-  const url = `${BASE}${path}`;
+  const url = DIRECT_BACKEND
+    ? `${DIRECT_BACKEND}/api/v1${path}`
+    : `${BASE}${path}`;     // dev fallback (proxy)
   const token = await getAccessToken();
   const headers: Record<string, string> = {};
   if (token) headers['Authorization'] = `Bearer ${token}`;
