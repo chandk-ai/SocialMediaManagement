@@ -2,12 +2,28 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import asdict
 
 from app.adapters.llm.base import LLMRequest
 from app.domain.value_objects.content import DraftPost, Hashtag
 
 from .base import Agent, AgentState
+
+
+# Concurrency cap on parallel per-blueprint LLM calls. The Executor
+# used to call ``asyncio.gather(*tasks)`` with no limit; a workflow
+# fanning out to 5 platforms therefore fired 5 simultaneous LLM
+# requests, plus another 1-2 if Planner / Critique calls overlapped.
+# Even on a paid LLM tier this trips the provider's PER-SECOND
+# burst limit (1000 RPM ≈ 16 RPS; 5 concurrent + multimodal payloads
+# regularly produces 429 Quota Exceeded).
+#
+# 4 is the floor that keeps a typical 5-platform run from saturating
+# any single provider's burst window. Override via env for stress
+# tests or if you upgrade to higher tiers.
+_EXECUTOR_LLM_CONCURRENCY = int(os.getenv("EXECUTOR_LLM_CONCURRENCY", "4"))
+
 
 EXECUTOR_SYSTEM = """You are the Executor agent. Given a single PostBlueprint
 and any prior critique notes, produce the final post text for the target platform.
@@ -43,6 +59,12 @@ class ExecutorAgent(Agent):
                 + "\n- ".join(state.critique_notes)
             )
 
+        # One semaphore per executor invocation. Different runs get
+        # independent buckets — we're throttling within a run, not
+        # globally across the org. The worker process's own concurrency
+        # (smms-jobs-worker = 4 by default) provides the cross-run cap.
+        llm_gate = asyncio.Semaphore(_EXECUTOR_LLM_CONCURRENCY)
+
         async def _make_one(bp) -> DraftPost:
             limit = self.PLATFORM_LIMITS.get(bp.platform_name, 1000)
             voice_block = ("\n\n" + state.voice_block) if state.voice_block else ""
@@ -76,11 +98,15 @@ class ExecutorAgent(Agent):
                 if m and m.url and getattr(m, "kind", None) is not None
                 and m.kind.value == "image"
             )
-            rsp = await self.llm.complete(LLMRequest(
-                prompt=prompt, system=system,
-                temperature=0.7, max_tokens=600,
-                image_urls=image_urls,
-            ))
+            # Hold the gate around the LLM call (the multimodal-heavy
+            # part). Media generation that follows is fast / non-LLM
+            # so we let it run after release.
+            async with llm_gate:
+                rsp = await self.llm.complete(LLMRequest(
+                    prompt=prompt, system=system,
+                    temperature=0.7, max_tokens=600,
+                    image_urls=image_urls,
+                ))
             text = rsp.text.strip()
             media = await _maybe_generate_media(bp, state)
             return DraftPost(

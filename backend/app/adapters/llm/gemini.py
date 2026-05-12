@@ -19,7 +19,9 @@ Default model:
 """
 from __future__ import annotations
 
+import asyncio
 import os
+import re
 from typing import Any
 
 import httpx
@@ -53,6 +55,20 @@ _MODEL_ALIASES: dict[str, str] = {
     "gemini-pro": "gemini-flash-latest",
 }
 
+# 429 retry config. Google's paid tiers occasionally throttle bursts
+# even when you're under the RPM quota — concurrent multimodal calls
+# from a fan-out workflow can momentarily exceed the per-second cap.
+# A small exponential-backoff retry absorbs those transient blips
+# without surfacing them to the user.
+_RATE_LIMIT_MAX_RETRIES = 3
+_RATE_LIMIT_BACKOFF_BASE = 2.0    # seconds — 2, 4, 8
+
+# Parses a "retryDelay" hint Google sometimes ships in the 429 body
+# (e.g. ``"retryDelay": "5s"``). Used by ``_parse_retry_after`` to
+# honour the server's preference over our default exponential schedule.
+_RETRY_AFTER_DELAY_RE = re.compile(r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s?"')
+
+
 # Preference order when auto-picking a fallback after a 404. We prefer
 # Flash (fastest + cheapest + most likely to be available on free tier)
 # over Pro, and newer over older.
@@ -78,6 +94,29 @@ class _ModelNotFound(Exception):
         self.message = message
         self.body = body
         super().__init__(f"model not found: {model}")
+
+
+def _parse_retry_after(response: httpx.Response) -> float | None:
+    """Pull a numeric delay (seconds) out of a 429 response. Tries the
+    standards-compliant ``Retry-After`` header first, then Google's
+    proprietary ``retryDelay: "5s"`` field inside the error body.
+    Returns None if neither is present so the caller can use its own
+    exponential-backoff schedule."""
+    header = response.headers.get("retry-after") or response.headers.get("Retry-After")
+    if header:
+        try:
+            return max(0.0, float(header))
+        except ValueError:
+            # ``Retry-After`` can also be an HTTP-date; we don't bother
+            # parsing those — the body hint usually wins.
+            pass
+    try:
+        m = _RETRY_AFTER_DELAY_RE.search(response.text or "")
+        if m:
+            return float(m.group(1))
+    except Exception:                                                 # noqa: BLE001
+        pass
+    return None
 
 
 def _guess_image_mime(url: str) -> str:
@@ -165,10 +204,15 @@ class GeminiProvider(LLMProvider):
                     f"{second_404.message} Models available: {available}."
                 ) from None
 
-    async def _invoke(self, model: str, req: LLMRequest) -> LLMResponse:
+    async def _invoke(
+        self, model: str, req: LLMRequest, *, _attempt: int = 0,
+    ) -> LLMResponse:
         """Single Gemini API call. Raises ``_ModelNotFound`` on 404 so
-        ``complete()`` can attempt auto-fallback. Other HTTP errors are
-        translated to clean RuntimeError messages (key-scrubbed)."""
+        ``complete()`` can attempt auto-fallback. 429 (quota / burst
+        limit) triggers an exponential-backoff retry up to
+        ``_RATE_LIMIT_MAX_RETRIES`` times before bubbling up. Other
+        HTTP errors are translated to clean RuntimeError messages
+        (key-scrubbed)."""
         # NEVER put the key in the URL — it ends up in error messages.
         url = (
             "https://generativelanguage.googleapis.com/v1beta/models/"
@@ -228,6 +272,35 @@ class GeminiProvider(LLMProvider):
                     msg = ""
                 raise _ModelNotFound(model=model, message=msg or scrubbed_body,
                                      body=scrubbed_body) from None
+            if status == 429:
+                # Quota or burst limit. Google's response sometimes
+                # includes a ``retryDelay`` hint inside details[].
+                # Use that when present, otherwise fall back to
+                # exponential backoff. We retry a small number of
+                # times before propagating so the caller (durable
+                # runner / executor) sees a clean failure on
+                # persistent throttling rather than an immediate one.
+                if _attempt < _RATE_LIMIT_MAX_RETRIES:
+                    delay = _parse_retry_after(exc.response)
+                    if delay is None:
+                        delay = _RATE_LIMIT_BACKOFF_BASE * (2 ** _attempt)
+                    log.info("gemini_rate_limited_retrying",
+                             model=model, attempt=_attempt + 1,
+                             delay_seconds=delay)
+                    await asyncio.sleep(delay)
+                    return await self._invoke(
+                        model, req, _attempt=_attempt + 1,
+                    )
+                # Out of retries — surface a clear "you're hitting
+                # the rate limit" so the user upgrades tier or we
+                # tighten the EXECUTOR_LLM_CONCURRENCY semaphore.
+                raise RuntimeError(
+                    f"Gemini API 429 after {_RATE_LIMIT_MAX_RETRIES} "
+                    f"retries — burst / quota limit. Increase tier, "
+                    f"lower EXECUTOR_LLM_CONCURRENCY (currently "
+                    f"controls per-run fan-out), or split workflows "
+                    f"across multiple API keys. Body: {scrubbed_body}"
+                ) from None
             if status in (401, 403):
                 raise RuntimeError(
                     f"Gemini API {status} — the API key was rejected. "

@@ -190,6 +190,22 @@ prose belongs in module docstrings; this file is a checklist.
   → iOS → Android → web). The default model is `gemini-flash-latest`
   rather than a versioned name so it tracks Google's rotations.
 
+* **Per-run LLM concurrency is capped at `EXECUTOR_LLM_CONCURRENCY`
+  (default 4).** The Executor used to fire all per-platform LLM calls
+  with no concurrency limit, which trip per-second burst limits even
+  on paid LLM tiers. The semaphore is scoped per run (independent
+  buckets across orgs); the worker process's own concurrency
+  (`SMMS_WORKERS_CONCURRENCY=4`) provides the cross-run ceiling.
+  Adjust via env if you upgrade to a higher LLM tier with more RPS
+  headroom.
+
+* **The Gemini provider retries 429 up to 3× with exponential
+  backoff** (base 2s, doubling), honoring Google's `retryDelay` hint
+  when present. After retries exhaust, the error surfaces with
+  actionable copy ("lower EXECUTOR_LLM_CONCURRENCY or upgrade tier").
+  Other providers (Anthropic, OpenAI) get the same treatment when we
+  hit the same problem there — keep this contract uniform.
+
 ## Posts / publish
 
 * **Drafts are materialized as `Post(status=REVIEW)` whenever a run
