@@ -69,6 +69,12 @@ export type Workflow = {
   updated_at: string;
 };
 
+export type Media = {
+  url: string;
+  kind: 'image' | 'video' | 'gif';
+  alt_text?: string | null;
+};
+
 export type Post = {
   id: string;
   workflow_id: string;
@@ -82,6 +88,7 @@ export type Post = {
   external_post_id: string | null;
   error: string | null;
   created_at: string;
+  media?: Media[];
 };
 
 export type Trigger = {

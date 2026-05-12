@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from app.api.deps import current_user, get_audit_log_service, get_post_service
 from app.core.security import Principal
 from app.domain.entities.post import PostStatus
-from app.domain.value_objects.content import Hashtag
+from app.domain.value_objects.content import Hashtag, MediaAsset, MediaKind
 from app.domain.value_objects.ids import OrgId, PostId
 from app.schemas.posts import PostOut
 from app.services.audit_log import AuditLogService
@@ -19,12 +19,30 @@ router = APIRouter()
 
 
 def _to_out(p) -> PostOut:
+    # ``p.media`` is a list of MediaAsset dataclasses (or already-dict
+    # shapes when the supabase repo hasn't fully rehydrated). Handle
+    # both gracefully so list_posts doesn't 500 on legacy rows.
+    media_out = []
+    for m in (p.media or []):
+        if hasattr(m, "url"):
+            media_out.append({
+                "url": m.url,
+                "kind": getattr(m.kind, "value", m.kind) if m.kind else "image",
+                "alt_text": getattr(m, "alt_text", None),
+            })
+        elif isinstance(m, dict):
+            media_out.append({
+                "url": m.get("url", ""),
+                "kind": m.get("kind", "image"),
+                "alt_text": m.get("alt_text"),
+            })
     return PostOut(
         id=p.id, workflow_id=p.workflow_id, run_id=p.run_id,
         platform_id=p.platform_id, text=p.text,
         hashtags=[h.value for h in p.hashtags], status=p.status.value,
         scheduled_for=p.scheduled_for, published_at=p.published_at,
         external_post_id=p.external_post_id, error=p.error, created_at=p.created_at,
+        media=media_out,
     )
 
 
@@ -52,10 +70,25 @@ async def republish(
     return {"queued": True, "post_id": str(post_id)}
 
 
+class MediaIn(BaseModel):
+    """One media attachment. ``url`` must be a publicly reachable HTTPS
+    URL because some platforms (Instagram, Pinterest) fetch the binary
+    server-side rather than accepting a multipart upload from us. For
+    private storage (Google Drive folders shared "with link", Supabase
+    Storage public buckets, S3 with a presigned URL), use a presigned
+    or public-read URL."""
+    url: str
+    kind: str = "image"          # "image" | "video" | "gif"
+    alt_text: str | None = None
+
+
 class PostUpdateBody(BaseModel):
     text: str | None = None
     hashtags: list[str] | None = None
     scheduled_for: datetime | None = None
+    # Pass ``[]`` to clear; ``None`` (default) leaves existing media
+    # untouched.
+    media: list[MediaIn] | None = None
 
 
 async def _require_owned(svc: PostService, org_id: OrgId, post_id: PostId):
@@ -83,6 +116,20 @@ async def update_post(
         p.scheduled_for = body.scheduled_for
         if p.status == PostStatus.APPROVED:
             p.status = PostStatus.SCHEDULED
+    if body.media is not None:
+        # Normalize MediaKind via the enum so an invalid value short-
+        # circuits with a 422 instead of silently coercing later.
+        try:
+            p.media = [
+                MediaAsset(
+                    url=m.url,
+                    kind=MediaKind(m.kind),
+                    alt_text=m.alt_text,
+                )
+                for m in body.media
+            ]
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     await svc.repo.update(p)
     return _to_out(p)
 

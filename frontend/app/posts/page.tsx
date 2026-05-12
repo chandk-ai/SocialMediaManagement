@@ -7,8 +7,8 @@ import { Sidebar } from '@/components/layout/Sidebar';
 import { TopBar } from '@/components/layout/TopBar';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { useApi, api, ApiError } from '@/lib/api/client';
-import type { Post } from '@/lib/api/types';
-import { FileText, Check, Edit3, Trash2, Send, X, AlertTriangle } from 'lucide-react';
+import type { Media, Post } from '@/lib/api/types';
+import { FileText, Check, Edit3, Trash2, Send, X, AlertTriangle, Plus, Image as ImageIcon } from 'lucide-react';
 import { useState } from 'react';
 import { mutate } from 'swr';
 import { formatDateTime } from '@/lib/utils';
@@ -120,6 +120,37 @@ function PostRow({ post, swrKey, onEdit }: {
           {post.hashtags.length > 0 && (
             <div className="mt-2 text-xs text-accent">{post.hashtags.join(' ')}</div>
           )}
+          {post.media && post.media.length > 0 && (
+            <div className="mt-2 flex gap-2 flex-wrap">
+              {post.media.slice(0, 4).map((m, i) => (
+                m.kind === 'video' ? (
+                  <div
+                    key={i}
+                    className="w-16 h-16 rounded border border-ink-200 bg-ink-50 flex items-center justify-center text-[10px] text-ink-500"
+                    title={m.url}
+                  >
+                    ▶ video
+                  </div>
+                ) : (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    key={i}
+                    src={m.url}
+                    alt={m.alt_text ?? ''}
+                    className="w-16 h-16 rounded object-cover border border-ink-200 bg-ink-50"
+                    onError={(e) => {
+                      (e.currentTarget as HTMLImageElement).style.display = 'none';
+                    }}
+                  />
+                )
+              ))}
+              {post.media.length > 4 && (
+                <div className="w-16 h-16 rounded border border-ink-200 bg-ink-50 flex items-center justify-center text-xs text-ink-500">
+                  +{post.media.length - 4}
+                </div>
+              )}
+            </div>
+          )}
           <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-ink-500">
             <span>created {formatDateTime(post.created_at)}</span>
             {post.scheduled_for && <span>· scheduled for {formatDateTime(post.scheduled_for)}</span>}
@@ -194,8 +225,19 @@ function EditDialog({ post, swrKey, onClose }: {
   const [text, setText] = useState(cleanText(post.text));
   const [hashtags, setHashtags] = useState(post.hashtags.join(' '));
   const [scheduledFor, setScheduledFor] = useState(post.scheduled_for ? post.scheduled_for.slice(0, 16) : '');
+  const [media, setMedia] = useState<Media[]>(post.media ?? []);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  function addMediaRow() {
+    setMedia(prev => [...prev, { url: '', kind: 'image', alt_text: '' }]);
+  }
+  function updateMedia(idx: number, patch: Partial<Media>) {
+    setMedia(prev => prev.map((m, i) => (i === idx ? { ...m, ...patch } : m)));
+  }
+  function removeMedia(idx: number) {
+    setMedia(prev => prev.filter((_, i) => i !== idx));
+  }
 
   async function save() {
     setBusy(true); setErr(null);
@@ -205,7 +247,24 @@ function EditDialog({ post, swrKey, onClose }: {
         .map(s => s.trim())
         .filter(Boolean)
         .map(s => (s.startsWith('#') ? s : `#${s}`));
-      const body: Record<string, unknown> = { text, hashtags: tags };
+
+      // Reject obviously-bad media URLs client-side so the server
+      // doesn't have to. Empty rows are silently dropped (lets the
+      // user start typing a row then cancel).
+      const cleanedMedia = media
+        .map(m => ({ ...m, url: m.url.trim() }))
+        .filter(m => m.url !== '');
+      for (const m of cleanedMedia) {
+        if (!/^https?:\/\//i.test(m.url)) {
+          throw new Error(
+            `Media URL must start with http:// or https://. Got "${m.url.slice(0, 60)}".`,
+          );
+        }
+      }
+
+      const body: Record<string, unknown> = {
+        text, hashtags: tags, media: cleanedMedia,
+      };
       if (scheduledFor) body.scheduled_for = new Date(scheduledFor).toISOString();
       await api.patch(`/posts/${post.id}`, body);
       await mutate(swrKey);
@@ -220,7 +279,7 @@ function EditDialog({ post, swrKey, onClose }: {
 
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50" onClick={onClose}>
-      <Card className="w-full max-w-xl" onClick={(e: any) => e.stopPropagation()}>
+      <Card className="w-full max-w-2xl max-h-[90vh] overflow-y-auto" onClick={(e: any) => e.stopPropagation()}>
         <div className="flex items-start justify-between mb-3">
           <h3 className="text-base font-semibold">Edit post</h3>
           <button onClick={onClose} className="text-ink-500 hover:text-ink-700">
@@ -233,7 +292,75 @@ function EditDialog({ post, swrKey, onClose }: {
           Hashtags (space-separated)
         </label>
         <Input value={hashtags} onChange={(e: any) => setHashtags(e.target.value)} placeholder="#brand #launch" />
-        <label className="block text-xs text-ink-500 mt-3 mb-1">
+
+        {/* ── Media section ───────────────────────────────────────── */}
+        <div className="mt-4">
+          <div className="flex items-center justify-between mb-1">
+            <label className="block text-xs text-ink-500">
+              Media (paste a public image / video URL)
+            </label>
+            <button
+              type="button"
+              onClick={addMediaRow}
+              className="text-xs flex items-center gap-1 text-accent hover:underline"
+            >
+              <Plus size={12} /> Add media
+            </button>
+          </div>
+          {media.length === 0 ? (
+            <div className="text-xs text-ink-500 bg-ink-50 border border-dashed border-ink-200 rounded p-3 flex items-start gap-2">
+              <ImageIcon size={14} className="mt-0.5 shrink-0" />
+              <span>
+                No media attached. Some platforms (Instagram, Pinterest)
+                require an image or video. Paste a publicly reachable HTTPS
+                URL — works with Google Drive (sharing link → "Anyone with
+                the link"), Supabase Storage public buckets, S3 presigned
+                URLs, Unsplash, your CDN, etc.
+              </span>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {media.map((m, idx) => (
+                <div key={idx} className="flex gap-2 items-start">
+                  <div className="flex-1 space-y-1">
+                    <Input
+                      value={m.url}
+                      onChange={(e: any) => updateMedia(idx, { url: e.target.value })}
+                      placeholder="https://example.com/photo.jpg"
+                    />
+                    <div className="flex gap-2 items-center">
+                      <select
+                        value={m.kind}
+                        onChange={e => updateMedia(idx, { kind: e.target.value as Media['kind'] })}
+                        className="text-xs border border-ink-200 rounded px-2 py-1 bg-white"
+                      >
+                        <option value="image">Image</option>
+                        <option value="video">Video</option>
+                        <option value="gif">GIF</option>
+                      </select>
+                      <Input
+                        value={m.alt_text ?? ''}
+                        onChange={(e: any) => updateMedia(idx, { alt_text: e.target.value })}
+                        placeholder="Alt text (accessibility, optional)"
+                        className="flex-1 text-xs"
+                      />
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => removeMedia(idx)}
+                    className="text-ink-500 hover:text-red-600 p-1"
+                    title="Remove this attachment"
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <label className="block text-xs text-ink-500 mt-4 mb-1">
           Scheduled for (optional)
         </label>
         <Input
