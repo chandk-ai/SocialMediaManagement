@@ -6,6 +6,8 @@ The system supports two persistence backends:
 """
 from __future__ import annotations
 
+import os
+import sys
 from functools import lru_cache
 
 from fastapi import Depends
@@ -49,6 +51,68 @@ from app.services import (
     WorkflowService,
 )
 
+
+def _is_celery_context() -> bool:
+    """True when this Python process is a Celery worker / beat scheduler.
+
+    Why this matters: every Celery task that wraps ``asyncio.run()``
+    creates a NEW event loop, runs the coroutine, then closes the
+    loop. Any asyncpg connection that got opened inside that
+    ``asyncio.run`` is bound to the now-dead loop. The next tick
+    tries to reuse the cached connection from the same SQLAlchemy
+    AsyncEngine pool and crashes with::
+
+        RuntimeError: Future ... attached to a different loop
+
+    Detecting the Celery context lets ``_build_repos`` swap the
+    AsyncEngine's pool for ``NullPool`` — each session opens a fresh
+    connection and disposes it on close, so nothing survives across
+    ``asyncio.run`` boundaries. FastAPI workers (single long-lived
+    event loop per gunicorn process) keep normal pooling.
+
+    Detection signals, in order:
+      1. ``CELERY_WORKER_RUNNING`` env var (we set this in the
+         Celery worker_init signal — see celery_app.py).
+      2. argv inspection — ``celery worker`` / ``celery beat`` /
+         ``celeryd`` in any arg. Catches subprocess + bin-script
+         invocations alike.
+    """
+    if os.environ.get("CELERY_WORKER_RUNNING") == "1":
+        return True
+    argv = " ".join(sys.argv or []).lower()
+    return "celery" in argv
+
+
+def _make_async_engine(settings: Settings):
+    """Single chokepoint for AsyncEngine construction.
+
+    All ``@lru_cache``'d service factories below MUST go through this helper
+    instead of calling ``create_async_engine`` directly. The cache means each
+    engine outlives a single request / Celery tick — and inside Celery the
+    asyncio loop changes every tick, so any asyncpg connection held by a
+    pooled engine becomes "attached to a different loop" garbage. Routing
+    every engine through one builder lets us flip the entire process to
+    ``NullPool`` in Celery context with one ``if``.
+
+    FastAPI workers have a single long-lived event loop per gunicorn
+    process, so the normal QueuePool is fine and faster.
+    """
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    kwargs: dict = {
+        "pool_pre_ping": True,
+        "echo": settings.db.echo,
+        "connect_args": settings.db_connect_args(),
+    }
+    if _is_celery_context():
+        from sqlalchemy.pool import NullPool
+        kwargs["poolclass"] = NullPool
+    else:
+        kwargs["pool_size"] = settings.db.pool_size
+        kwargs["max_overflow"] = settings.db.max_overflow
+    return create_async_engine(settings.db_url(), **kwargs)
+
+
 log = get_logger(__name__)
 
 
@@ -66,7 +130,7 @@ def _build_repos(settings: Settings | None = None) -> dict:
 
     if backend == "supabase":
         try:
-            from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+            from sqlalchemy.ext.asyncio import async_sessionmaker
             from app.repositories.supabase_repo import (
                 SupabasePlatformRepository,
                 SupabasePostRepository,
@@ -81,14 +145,9 @@ def _build_repos(settings: Settings | None = None) -> dict:
             log.warning("sqlalchemy_missing_falling_back_to_memory")
             return _memory_repos()
 
-        engine = create_async_engine(
-            settings.db_url(),
-            pool_pre_ping=True,
-            pool_size=settings.db.pool_size,
-            max_overflow=settings.db.max_overflow,
-            echo=settings.db.echo,
-            connect_args=settings.db_connect_args(),
-        )
+        engine = _make_async_engine(settings)
+        if _is_celery_context():
+            log.info("db_engine_using_nullpool_for_celery")
         sm = async_sessionmaker(engine, expire_on_commit=False)
         return {
             "platform": SupabasePlatformRepository(sm),
@@ -184,13 +243,9 @@ def _get_llm_usage_service():
     if settings.resolved_persistence_backend() != "supabase":
         return None
     try:
-        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from sqlalchemy.ext.asyncio import async_sessionmaker
         from app.services.llm_usage import LlmUsageService
-        engine = create_async_engine(
-            settings.db_url(),
-            pool_pre_ping=True,
-            connect_args=settings.db_connect_args(),
-        )
+        engine = _make_async_engine(settings)
         sm = async_sessionmaker(engine, expire_on_commit=False)
         return LlmUsageService(sm)
     except Exception:                                            # noqa: BLE001
@@ -209,13 +264,9 @@ def _get_team_service():
     if settings.resolved_persistence_backend() != "supabase":
         return None
     try:
-        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from sqlalchemy.ext.asyncio import async_sessionmaker
         from app.services.team import TeamService
-        engine = create_async_engine(
-            settings.db_url(),
-            pool_pre_ping=True,
-            connect_args=settings.db_connect_args(),
-        )
+        engine = _make_async_engine(settings)
         sm = async_sessionmaker(engine, expire_on_commit=False)
         return TeamService(sm)
     except Exception:                                            # noqa: BLE001
@@ -234,13 +285,9 @@ def _get_source_items_service():
     settings = get_settings()
     if settings.resolved_persistence_backend() == "supabase":
         try:
-            from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+            from sqlalchemy.ext.asyncio import async_sessionmaker
             from app.services.source_items import SourceItemsService
-            engine = create_async_engine(
-                settings.db_url(),
-                pool_pre_ping=True,
-                connect_args=settings.db_connect_args(),
-            )
+            engine = _make_async_engine(settings)
             sm = async_sessionmaker(engine, expire_on_commit=False)
             return SourceItemsService(sm)
         except Exception:                                            # noqa: BLE001
@@ -263,13 +310,9 @@ def _get_audit_log_service():
     if settings.resolved_persistence_backend() != "supabase":
         return None
     try:
-        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from sqlalchemy.ext.asyncio import async_sessionmaker
         from app.services.audit_log import AuditLogService
-        engine = create_async_engine(
-            settings.db_url(),
-            pool_pre_ping=True,
-            connect_args=settings.db_connect_args(),
-        )
+        engine = _make_async_engine(settings)
         sm = async_sessionmaker(engine, expire_on_commit=False)
         return AuditLogService(sm)
     except Exception:                                            # noqa: BLE001
@@ -288,13 +331,9 @@ def _get_llm_credentials_service():
     if settings.resolved_persistence_backend() != "supabase":
         return None
     try:
-        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from sqlalchemy.ext.asyncio import async_sessionmaker
         from app.services.llm_credentials import LlmCredentialsService
-        engine = create_async_engine(
-            settings.db_url(),
-            pool_pre_ping=True,
-            connect_args=settings.db_connect_args(),
-        )
+        engine = _make_async_engine(settings)
         sm = async_sessionmaker(engine, expire_on_commit=False)
         return LlmCredentialsService(sm)
     except Exception:                                            # noqa: BLE001
@@ -317,13 +356,9 @@ def _get_job_queue():
     settings = get_settings()
     if settings.resolved_persistence_backend() == "supabase":
         try:
-            from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+            from sqlalchemy.ext.asyncio import async_sessionmaker
             from app.services.jobs.queue import PostgresJobQueue
-            engine = create_async_engine(
-                settings.db_url(),
-                pool_pre_ping=True,
-                connect_args=settings.db_connect_args(),
-            )
+            engine = _make_async_engine(settings)
             sm = async_sessionmaker(engine, expire_on_commit=False)
             return PostgresJobQueue(sm)
         except Exception:                                            # noqa: BLE001
@@ -341,12 +376,9 @@ def _get_circuit_breaker():
     settings = get_settings()
     if settings.resolved_persistence_backend() == "supabase":
         try:
-            from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+            from sqlalchemy.ext.asyncio import async_sessionmaker
             from app.services.circuit_breaker import PostgresCircuitBreaker
-            engine = create_async_engine(
-                settings.db_url(), pool_pre_ping=True,
-                connect_args=settings.db_connect_args(),
-            )
+            engine = _make_async_engine(settings)
             sm = async_sessionmaker(engine, expire_on_commit=False)
             return PostgresCircuitBreaker(sm)
         except Exception:                                            # noqa: BLE001
@@ -364,12 +396,9 @@ def _get_tenant_rate_limiter():
     settings = get_settings()
     if settings.resolved_persistence_backend() == "supabase":
         try:
-            from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+            from sqlalchemy.ext.asyncio import async_sessionmaker
             from app.services.tenant_rate_limiter import PostgresTenantRateLimiter
-            engine = create_async_engine(
-                settings.db_url(), pool_pre_ping=True,
-                connect_args=settings.db_connect_args(),
-            )
+            engine = _make_async_engine(settings)
             sm = async_sessionmaker(engine, expire_on_commit=False)
             return PostgresTenantRateLimiter(sm)
         except Exception:                                            # noqa: BLE001
@@ -415,12 +444,9 @@ def _get_engagement_service():
     repos = _build_repos()
     if settings.resolved_persistence_backend() == "supabase":
         try:
-            from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+            from sqlalchemy.ext.asyncio import async_sessionmaker
             from app.services.engagement.service import PostgresEngagementService
-            engine = create_async_engine(
-                settings.db_url(), pool_pre_ping=True,
-                connect_args=settings.db_connect_args(),
-            )
+            engine = _make_async_engine(settings)
             sm = async_sessionmaker(engine, expire_on_commit=False)
             return PostgresEngagementService(
                 sm, post_repo=repos["post"],
@@ -447,12 +473,9 @@ def _get_knowledge_store():
     settings = get_settings()
     if settings.resolved_persistence_backend() == "supabase":
         try:
-            from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+            from sqlalchemy.ext.asyncio import async_sessionmaker
             from app.services.knowledge.store import PostgresKnowledgeStore
-            engine = create_async_engine(
-                settings.db_url(), pool_pre_ping=True,
-                connect_args=settings.db_connect_args(),
-            )
+            engine = _make_async_engine(settings)
             sm = async_sessionmaker(engine, expire_on_commit=False)
             return PostgresKnowledgeStore(sm)
         except Exception:                                            # noqa: BLE001

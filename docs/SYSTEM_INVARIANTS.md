@@ -69,6 +69,26 @@ prose belongs in module docstrings; this file is a checklist.
   (Sentry, YouTube cookies, optional LLM keys) so the Blueprint
   sync succeeds even when those values aren't filled in on smms-api.
 
+* **Celery tasks call `asyncio.run()` per tick. Each tick is a NEW
+  event loop, then closed.** Any asyncpg connection that gets cached
+  in the SQLAlchemy pool from a previous tick is bound to a dead
+  loop — the next tick crashes with `Future attached to a different
+  loop`. Mitigation:
+  * `app/api/deps.py:_is_celery_context()` detects the worker via
+    `CELERY_WORKER_RUNNING=1` env var (set by `worker_process_init` /
+    `beat_init` signals in `celery_app.py`), with argv inspection as
+    fallback.
+  * `_make_async_engine(settings)` is the SINGLE chokepoint for
+    `create_async_engine` everywhere in `deps.py`. It flips to
+    `NullPool` in Celery context — connections are opened fresh per
+    session and disposed on close, so nothing outlives a single
+    `asyncio.run`. FastAPI keeps QueuePool (one long-lived loop per
+    gunicorn worker).
+  * **Do NOT call `create_async_engine` directly anywhere else in
+    `deps.py`.** Every new service factory must go through
+    `_make_async_engine`, otherwise it will silently regress to
+    QueuePool and crash inside Celery.
+
 ## OAuth / credentials
 
 * **`platforms.status='connected'` MUST imply a row in
