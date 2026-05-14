@@ -131,6 +131,82 @@ async def cancel_job(
     return {"id": str(job_id), "status": JobStatus.CANCELLED.value}
 
 
+class BulkCancelBody(BaseModel):
+    """Either ``job_ids`` OR (``status`` / ``kind``) filter — not both
+    at once. When both are absent, the request is rejected to prevent
+    a "cancel literally every job in the org" footgun."""
+    job_ids: list[UUID] | None = None
+    status: str | None = None
+    kind: str | None = None
+    reason: str | None = None
+
+
+@router.post("/jobs/bulk-cancel")
+async def bulk_cancel_jobs(
+    body: BulkCancelBody,
+    user: Principal = Depends(current_user),
+    queue: JobQueue = Depends(get_job_queue),
+    audit: AuditLogService | None = Depends(get_audit_log_service),
+) -> dict:
+    """Cancel many jobs in a single Postgres UPDATE. Used by the
+    admin dashboard's "Cancel selected" / "Cancel all queued"
+    actions. Already-terminal jobs are silently skipped — the
+    response's ``cancelled`` count reflects what actually
+    transitioned.
+
+    Safety:
+      * ``can_admin`` required (same as per-job cancel).
+      * Request must specify either ``job_ids`` OR at least one of
+        (``status`` / ``kind``). An empty body would otherwise
+        cancel everything in the org — explicit > implicit.
+      * The underlying ``bulk_cancel`` always scopes by ``org_id``,
+        so an attacker passing other orgs' IDs can't touch them.
+
+    Returns: ``{"cancelled": int, "scope": "ids"|"filter"}``
+    """
+    if not user.role.can_admin():
+        raise HTTPException(status_code=403, detail="Admin role required")
+
+    if body.job_ids is None and not body.status and not body.kind:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide either job_ids or a status/kind filter — "
+                   "refusing to cancel every job in the org.",
+        )
+
+    job_ids = [str(j) for j in body.job_ids] if body.job_ids else None
+    try:
+        cancelled = await queue.bulk_cancel(
+            user.org_id,
+            job_ids=job_ids,
+            status=body.status,
+            kind=body.kind,
+        )
+    except Exception as exc:                                          # noqa: BLE001
+        raise HTTPException(
+            status_code=502,
+            detail=f"Bulk cancel failed: {exc}",
+        ) from exc
+
+    if audit is not None:
+        await audit.record(
+            org_id=user.org_id, action="job.bulk_cancel",
+            resource_type="job", resource_id=None,
+            after={
+                "cancelled": cancelled,
+                "scope": "ids" if job_ids else "filter",
+                "status_filter": body.status,
+                "kind_filter": body.kind,
+                "ids_count": len(job_ids) if job_ids else None,
+                "reason": body.reason,
+            },
+        )
+    return {
+        "cancelled": cancelled,
+        "scope": "ids" if job_ids else "filter",
+    }
+
+
 @router.post("/jobs/{job_id}/retry")
 async def retry_job(
     job_id: UUID,

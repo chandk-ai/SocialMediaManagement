@@ -60,6 +60,11 @@ export default function AdminJobsPage() {
   const [autoRefresh, setAutoRefresh] = useState<boolean>(true);
   const [selected, setSelected] = useState<Job | null>(null);
   const [bulkRetrying, setBulkRetrying] = useState(false);
+  // Multi-select state: row id → checked. Cleared on filter change so
+  // a selection from a different filter doesn't leak into the next
+  // bulk action.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkCancelling, setBulkCancelling] = useState(false);
 
   async function refresh() {
     try {
@@ -92,6 +97,11 @@ export default function AdminJobsPage() {
   useEffect(() => {
     setLoading(true);
     refresh();
+    // Filter changed → clear any selection from the previous filter
+    // (otherwise the user might think they're cancelling 5 queued
+    // jobs but the selection still contains ones the filter no
+    // longer shows).
+    setSelectedIds(new Set());
   }, [filter, kindFilter]);
 
   useEffect(() => {
@@ -151,6 +161,74 @@ export default function AdminJobsPage() {
     refresh();
   }
 
+  // ── Multi-select & bulk-cancel ───────────────────────────────────────
+  function toggleRow(id: string) {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  // ``activeFilteredIds`` is computed below, after ``filtered`` is
+  // declared (it's a useMemo over ``filtered``). The handlers here
+  // only reference state setters + the captured ``selectedIds``, so
+  // they're safe to declare in any order.
+
+  async function bulkCancelSelected() {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) {
+      toast.info('No jobs selected.');
+      return;
+    }
+    if (!confirm(
+      `Cancel ${ids.length} job${ids.length === 1 ? '' : 's'}?\n\n`
+      + 'Already-finished jobs in the selection are skipped automatically. '
+      + 'Cancellation is a single Supabase UPDATE — safe even for hundreds of rows.',
+    )) return;
+    setBulkCancelling(true);
+    try {
+      const data = await api.post<{ cancelled: number }>('/jobs/bulk-cancel', {
+        job_ids: ids,
+        reason: 'admin bulk cancel (selected)',
+      });
+      toast.success(`Cancelled ${data.cancelled} job${data.cancelled === 1 ? '' : 's'}.`);
+      setSelectedIds(new Set());
+      refresh();
+    } catch (e: any) {
+      toast.error(`Bulk cancel failed: ${e?.message || 'unknown'}`);
+    } finally {
+      setBulkCancelling(false);
+    }
+  }
+
+  async function bulkCancelByStatus(targetStatus: 'queued' | 'running') {
+    const count = counts[targetStatus] || 0;
+    if (count === 0) {
+      toast.info(`No ${targetStatus} jobs.`);
+      return;
+    }
+    if (!confirm(
+      `Cancel ALL ${count} ${targetStatus} job${count === 1 ? '' : 's'} `
+      + 'in your org? This is one Supabase UPDATE — fast and rate-limit-friendly.',
+    )) return;
+    setBulkCancelling(true);
+    try {
+      const data = await api.post<{ cancelled: number }>('/jobs/bulk-cancel', {
+        status: targetStatus,
+        reason: `admin bulk cancel (all ${targetStatus})`,
+      });
+      toast.success(`Cancelled ${data.cancelled} job${data.cancelled === 1 ? '' : 's'}.`);
+      setSelectedIds(new Set());
+      refresh();
+    } catch (e: any) {
+      toast.error(`Bulk cancel failed: ${e?.message || 'unknown'}`);
+    } finally {
+      setBulkCancelling(false);
+    }
+  }
+
   async function sweep() {
     try {
       const data = await api.post<{ recovered: number }>('/jobs/sweep');
@@ -177,6 +255,28 @@ export default function AdminJobsPage() {
       || (j.run_id || '').toLowerCase().includes(q),
     );
   }, [jobs, search]);
+
+  // "Select all" toggles only ACTIVE jobs in the current view —
+  // already-terminal jobs (succeeded/failed/dead/cancelled) can't be
+  // cancelled, so ticking them would mislead the user about what the
+  // bulk action will do. Declared AFTER ``filtered`` because it
+  // depends on it.
+  const activeFilteredIds = useMemo(
+    () => filtered
+      .filter(j => j.status === 'queued' || j.status === 'running')
+      .map(j => j.id),
+    [filtered],
+  );
+  const allActiveSelected = activeFilteredIds.length > 0
+    && activeFilteredIds.every(id => selectedIds.has(id));
+
+  function toggleSelectAll() {
+    if (allActiveSelected) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(activeFilteredIds));
+    }
+  }
 
   const deadCount = counts.dead || 0;
 
@@ -241,6 +341,35 @@ export default function AdminJobsPage() {
             <RefreshCcw size={14}/>
             {bulkRetrying ? 'Retrying…' : `Retry all dead${deadCount ? ` (${deadCount})` : ''}`}
           </button>
+          {/* Bulk cancel — selected rows OR all queued/running in the
+              current org via the dedicated bulk-cancel endpoint. The
+              selected-rows path is "exactly these IDs"; the by-status
+              path is the rate-limit-friendly "drain the queue" hatch
+              the user asked for. */}
+          <button
+            className="btn btn-outline text-red-700 hover:bg-red-50"
+            onClick={bulkCancelSelected}
+            disabled={bulkCancelling || selectedIds.size === 0}
+            title={selectedIds.size === 0
+              ? 'Tick the checkboxes on rows to enable'
+              : `Cancel ${selectedIds.size} selected`}
+          >
+            <XCircle size={14}/>
+            {bulkCancelling
+              ? 'Cancelling…'
+              : `Cancel selected${selectedIds.size ? ` (${selectedIds.size})` : ''}`}
+          </button>
+          <button
+            className="btn btn-outline text-red-700 hover:bg-red-50"
+            onClick={() => bulkCancelByStatus('queued')}
+            disabled={bulkCancelling || (counts.queued || 0) === 0}
+            title={(counts.queued || 0) === 0
+              ? 'No queued jobs'
+              : `Cancel all ${counts.queued} queued`}
+          >
+            <XCircle size={14}/>
+            Cancel all queued{counts.queued ? ` (${counts.queued})` : ''}
+          </button>
           <button
             className="btn btn-outline"
             onClick={sweep}
@@ -254,6 +383,19 @@ export default function AdminJobsPage() {
           <table className="w-full text-sm">
             <thead className="text-left text-xs text-ink-600 bg-stone-50">
               <tr>
+                <th className="p-2 w-[36px]">
+                  {/* "Select all on this page" — only ticks rows that
+                      can actually be cancelled (queued/running). */}
+                  <input
+                    type="checkbox"
+                    checked={allActiveSelected}
+                    disabled={activeFilteredIds.length === 0}
+                    onChange={toggleSelectAll}
+                    title={activeFilteredIds.length === 0
+                      ? 'No cancellable rows in view'
+                      : 'Select / clear all cancellable rows'}
+                  />
+                </th>
                 <th className="p-2">Kind</th>
                 <th className="p-2">Status</th>
                 <th className="p-2">Run</th>
@@ -266,19 +408,37 @@ export default function AdminJobsPage() {
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={8} className="p-4 text-center text-ink-500">Loading…</td></tr>
+                <tr><td colSpan={9} className="p-4 text-center text-ink-500">Loading…</td></tr>
               ) : filtered.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="p-8">
+                  <td colSpan={9} className="p-8">
                     <EmptyState filter={filter} search={search} />
                   </td>
                 </tr>
-              ) : filtered.map(j => (
+              ) : filtered.map(j => {
+                const cancellable = j.status === 'queued' || j.status === 'running';
+                return (
                 <tr
                   key={j.id}
-                  className="border-t hover:bg-stone-50 cursor-pointer"
+                  className={`border-t hover:bg-stone-50 cursor-pointer ${
+                    selectedIds.has(j.id) ? 'bg-blue-50' : ''
+                  }`}
                   onClick={() => loadJobDetail(j.id)}
                 >
+                  <td className="p-2" onClick={e => e.stopPropagation()}>
+                    {/* Checkbox is disabled for non-cancellable rows
+                        so the user can't tick something that the
+                        bulk-cancel SQL would silently skip anyway. */}
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.has(j.id)}
+                      onChange={() => toggleRow(j.id)}
+                      disabled={!cancellable}
+                      title={cancellable
+                        ? 'Select for bulk action'
+                        : `${j.status} — not cancellable`}
+                    />
+                  </td>
                   <td className="p-2 font-mono text-xs">{j.kind}</td>
                   <td className="p-2">
                     <span className={`px-2 py-0.5 rounded-full text-xs ${STATUS_TONE[j.status] || 'bg-stone-100 text-stone-800'}`}>
@@ -320,7 +480,8 @@ export default function AdminJobsPage() {
                     )}
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>

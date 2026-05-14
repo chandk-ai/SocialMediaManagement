@@ -124,6 +124,32 @@ class JobQueue(ABC):
     @abstractmethod
     async def cancel(self, job_id: str | UUID) -> None: ...
 
+    async def bulk_cancel(
+        self, org_id: str | UUID, *,
+        job_ids: list[str] | None = None,
+        status: str | None = None,
+        kind: str | None = None,
+    ) -> int:
+        """Cancel many jobs at once. Default implementation walks the
+        per-job ``cancel()`` API — concrete implementations should
+        override with a single SQL UPDATE for efficiency. Returns the
+        count of jobs actually transitioned from queued/running to
+        cancelled."""
+        if job_ids is None:
+            jobs = await self.list_for_org(
+                org_id, status=status, kind=kind, limit=1000,
+            )
+            job_ids = [str(j.id) for j in jobs
+                       if j.status in ("queued", "running")]
+        count = 0
+        for jid in job_ids:
+            try:
+                await self.cancel(jid)
+                count += 1
+            except JobNotFound:
+                pass
+        return count
+
     @abstractmethod
     async def get(self, job_id: str | UUID) -> JobRecord | None: ...
 
@@ -414,6 +440,66 @@ class PostgresJobQueue(JobQueue):
             if r.first() is None:
                 raise JobNotFound(str(job_id))
             await s.commit()
+
+    async def bulk_cancel(
+        self, org_id, *,
+        job_ids: list[str] | None = None,
+        status: str | None = None,
+        kind: str | None = None,
+    ) -> int:
+        """Cancel many jobs in a single UPDATE statement so the dashboard's
+        "cancel all queued" operation is one Postgres round-trip rather than
+        N. Returns the count of rows actually transitioned.
+
+        Filter precedence:
+          * If ``job_ids`` is provided, only those specific jobs are
+            considered (still scoped to ``org_id`` for safety).
+          * Otherwise ``status`` and/or ``kind`` are applied as filters
+            across the whole org.
+
+        Already-terminal statuses (succeeded / failed / dead /
+        cancelled) are silently skipped — we only cancel things that
+        are still queued or running. This is the equivalent of clicking
+        Cancel on each row except in one SQL hop, which is what makes
+        it Supabase-rate-limit-friendly when the queue has hundreds of
+        rows.
+        """
+        from sqlalchemy import text
+
+        clauses = ["org_id = :org", "status IN ('queued', 'running')"]
+        params: dict[str, Any] = {"org": str(org_id)}
+
+        if job_ids:
+            # Empty list = nothing to cancel; short-circuit so we don't
+            # send a malformed IN () clause.
+            if len(job_ids) == 0:
+                return 0
+            placeholders = []
+            for i, jid in enumerate(job_ids):
+                key = f"jid_{i}"
+                placeholders.append(f":{key}")
+                params[key] = str(jid)
+            clauses.append(f"id IN ({', '.join(placeholders)})")
+        else:
+            if status:
+                clauses.append("status = :status_filter")
+                params["status_filter"] = status
+            if kind:
+                clauses.append("kind = :kind_filter")
+                params["kind_filter"] = kind
+
+        sql = f"""
+            UPDATE smms.jobs
+               SET status = 'cancelled', finished_at = now()
+             WHERE {' AND '.join(clauses)}
+            RETURNING id
+        """
+
+        async with self._sm() as s:
+            r = await s.execute(text(sql), params)
+            rows = r.fetchall()
+            await s.commit()
+        return len(rows)
 
     async def get(self, job_id):
         from sqlalchemy import text

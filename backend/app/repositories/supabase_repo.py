@@ -139,6 +139,47 @@ def _source_to_orm(d: Source) -> SourceORM:
     )
 
 
+def _parse_iso(value) -> datetime | None:
+    """Convert an ISO-8601 string into a tz-aware ``datetime``. Returns
+    None for None / empty / unparseable input. Used at the JSONB
+    deserialization boundary so the domain layer never sees raw
+    strings where a ``datetime`` is expected.
+
+    Why this exists: Python dataclasses don't enforce type annotations
+    at runtime — passing a string into ``Schedule(run_at="2026-…")``
+    silently succeeds, then explodes the next time someone calls
+    ``.isoformat()`` on it (the pause workflow incident, May 12 2026).
+    Centralizing the parse keeps the trap shut.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            # Python's fromisoformat handles trailing-Z since 3.11 by
+            # accepting the offset form; normalize anyway for safety.
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return None
+
+
+def _to_iso(value) -> str | None:
+    """Dual to ``_parse_iso`` — accepts datetime OR an already-ISO
+    string OR None. Returns the canonical ISO-8601 representation."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        # Already ISO — validate by round-tripping. If it doesn't
+        # parse, drop it rather than persist garbage.
+        parsed = _parse_iso(value)
+        return parsed.isoformat() if parsed else None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return None
+
+
 def _workflow_to_domain(orm: WorkflowORM) -> Workflow:
     cfg = orm.config or {}
     sched = orm.schedule or {}
@@ -162,7 +203,8 @@ def _workflow_to_domain(orm: WorkflowORM) -> Workflow:
         schedule=Schedule(
             kind=ScheduleKind(sched.get("kind", "manual")),
             cron=sched.get("cron"), interval_minutes=sched.get("interval_minutes"),
-            run_at=sched.get("run_at"), timezone=sched.get("timezone", "UTC"),
+            run_at=_parse_iso(sched.get("run_at")),
+            timezone=sched.get("timezone", "UTC"),
         ),
         status=WorkflowStatus(orm.status),
         created_at=orm.created_at, updated_at=orm.updated_at,
@@ -189,7 +231,11 @@ def _workflow_to_orm(d: Workflow) -> WorkflowORM:
         schedule={
             "kind": d.schedule.kind.value, "cron": d.schedule.cron,
             "interval_minutes": d.schedule.interval_minutes,
-            "run_at": d.schedule.run_at.isoformat() if d.schedule.run_at else None,
+            # ``_to_iso`` handles BOTH datetime (the documented type)
+            # AND a stray string (defensive — old in-flight rows that
+            # were loaded before the _parse_iso fix landed could still
+            # have a string in ``Schedule.run_at`` when this runs).
+            "run_at": _to_iso(d.schedule.run_at),
             "timezone": d.schedule.timezone,
         },
         last_fired_at=d.last_fired_at,
