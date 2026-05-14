@@ -26,6 +26,7 @@ CMS contract — the user's Notion DB needs these fields (names configurable):
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any, AsyncIterator
 
@@ -38,6 +39,55 @@ from app.services.media_import import MediaImportError, MediaImportService
 from .base import ContentSource, SourceConnectionError
 
 log = get_logger(__name__)
+
+# A Notion database ID is a 32-char hex blob, optionally hyphenated as a
+# UUID. Users paste either:
+#   * the raw ID       — "c5e8d1f01234567890abcdef0123456789012345"
+#   * the hyphenated   — "c5e8d1f0-1234-5678-9abc-def012345678"
+#   * a Notion URL     — "https://www.notion.so/ws/Posts-c5e8d1f0...xyz?v=..."
+# In every case we extract / normalize to the hyphenated form before
+# hitting the API. Anything else (e.g. "CK", a column name, a workspace
+# slug) gets rejected up front with a helpful error.
+_HEX32_RE = re.compile(r"[0-9a-fA-F]{32}")
+
+
+def _resolve_database_id(raw: str | None) -> str:
+    """Normalize whatever the user typed into a hyphenated Notion database
+    UUID. Raises ``SourceConnectionError`` with a user-readable message when
+    the input is not parseable — that's surfaced at source-test time so the
+    user sees the problem before the first workflow run.
+
+    Accepts:
+      * raw hex blob (with or without hyphens)
+      * full Notion URL — extracts the 32-char hex from the path
+    """
+    s = (raw or "").strip()
+    if not s:
+        raise SourceConnectionError(
+            "database_id is required — paste either the database ID or the "
+            "Notion page URL."
+        )
+    # Strip URL noise: take the path component, drop anything after a `?` /
+    # `#`, then look for a 32-char hex blob anywhere in what remains. The
+    # Notion URL format puts the ID at the tail of the path: ``/Posts-<id>``
+    # or ``/<id>``.
+    candidate = s
+    if "://" in s:
+        # crude path extraction without pulling urllib — last segment after `/`
+        candidate = s.split("?", 1)[0].split("#", 1)[0]
+        candidate = candidate.rstrip("/").rsplit("/", 1)[-1]
+    # Drop hyphens for matching — the hex is the same with or without them.
+    flat = candidate.replace("-", "")
+    m = _HEX32_RE.search(flat)
+    if not m:
+        raise SourceConnectionError(
+            f"database_id {raw!r} doesn't look like a Notion database ID. "
+            "Paste either the 32-character ID or the full Notion URL "
+            "(e.g. https://www.notion.so/.../Posts-c5e8d1f0...)."
+        )
+    hex32 = m.group(0).lower()
+    # Re-hyphenate to the canonical 8-4-4-4-12 form Notion's API accepts.
+    return f"{hex32[0:8]}-{hex32[8:12]}-{hex32[12:16]}-{hex32[16:20]}-{hex32[20:32]}"
 
 # Hard cap on how many media items we'll import per Notion page to keep
 # any one fetch() call bounded. The first few attachments are usually
@@ -76,7 +126,10 @@ class NotionSource(ContentSource):
         "properties": {
             "api_token":         {"type": "string", "title": "Notion integration token",
                                   "x-secret": True},
-            "database_id":       {"type": "string", "title": "Database ID"},
+            "database_id":       {"type": "string", "title": "Database ID or URL",
+                                  "description": "Paste either the 32-character "
+                                  "database ID or the full Notion database URL — "
+                                  "we'll extract the ID automatically."},
             "title_property":    {"type": "string", "default": "Name",
                                   "title": "Title property name"},
             "page_size":         {"type": "integer", "minimum": 1, "maximum": 100,
@@ -110,12 +163,26 @@ class NotionSource(ContentSource):
     async def connect(self) -> None:
         if not self.config.get("api_token"):
             raise SourceConnectionError("api_token required")
+        # Validate + normalize the database ID up front so the user sees a
+        # clear error at source-test time, not 6 hours later in a worker
+        # log. ``_resolve_database_id`` raises SourceConnectionError on
+        # garbage input — we re-stamp the canonical form into the config
+        # so every subsequent fetch() / patch() call uses the hyphenated
+        # UUID Notion's API expects.
+        self.config["database_id"] = _resolve_database_id(
+            self.config.get("database_id")
+        )
 
     async def fetch(self, since: datetime | None = None) -> AsyncIterator[SourceItem]:
         try:
             import httpx
         except ImportError:
             return
+        # Defensive normalize on every fetch — covers sources persisted
+        # before the validator was added. ``connect()`` does this too, but
+        # the worker path can bypass connect() when the source object is
+        # reconstituted from the repo, so we re-resolve here.
+        database_id = _resolve_database_id(self.config.get("database_id"))
         headers = self._headers()
         body: dict[str, Any] = {"page_size": int(self.config.get("page_size", 50))}
 
@@ -134,7 +201,7 @@ class NotionSource(ContentSource):
 
         async with httpx.AsyncClient(timeout=20.0) as client:
             r = await client.post(
-                f"https://api.notion.com/v1/databases/{self.config['database_id']}/query",
+                f"https://api.notion.com/v1/databases/{database_id}/query",
                 json=body, headers=headers,
             )
             r.raise_for_status()

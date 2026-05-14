@@ -115,6 +115,26 @@ prose belongs in module docstrings; this file is a checklist.
   a Page ID as the IG user id — that produces "Object 1074... does
   not exist" downstream.
 
+## Source plugin inputs
+
+* **Every source plugin whose config carries an identifier that the
+  user copy-pastes (Notion database ID, Google Drive folder ID, RSS
+  URL, etc.) MUST normalize + validate that identifier at
+  `connect()` time** so the error surfaces in the Source Test UI,
+  not 6 hours later in a worker log. The pattern is in
+  `app/adapters/sources/notion.py`:
+  * `_resolve_database_id(raw)` accepts a raw ID, a hyphenated UUID,
+    or a full Notion URL — extracts/rebuilds the canonical form,
+    raises `SourceConnectionError` with a user-readable message on
+    garbage input.
+  * `connect()` calls the resolver and re-stamps the canonical value
+    back into `self.config` so every subsequent `fetch()` uses it.
+  * `fetch()` also calls the resolver defensively, because the
+    worker reconstitutes the source from the repo and may bypass
+    `connect()` on the run path.
+  * When adding a new source plugin, copy this shape — never inject
+    `self.config['some_id']` into a URL without validation.
+
 ## Media import
 
 * **Every external media URL that needs to outlive a single request
