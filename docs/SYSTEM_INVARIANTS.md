@@ -135,6 +135,34 @@ prose belongs in module docstrings; this file is a checklist.
   * When adding a new source plugin, copy this shape — never inject
     `self.config['some_id']` into a URL without validation.
 
+## Source media extraction (Notion specifically — pattern applies elsewhere)
+
+* **Notion's page cover image lives on `page.cover`, NOT in
+  `/blocks/{id}/children`.** Most Notion authors put their hero
+  image there, not as an inline image block. A source media
+  extractor that only walks block children silently misses ~80% of
+  user images. Fix: `_extract_page_media` accepts the FULL page dict
+  and pulls `page.cover` as candidate #1 before walking blocks.
+
+* **Recurse one level into container blocks** (`column_list`,
+  `column`, `toggle`, `callout`, `quote`, `synced_block`) — they
+  commonly hold media in real-world Notion layouts. Cap recursion
+  at one level: deeper trees explode latency on a 50-row fetch.
+
+* **Per-page extraction must emit a `notion_media_summary` log
+  line** with `candidates / imported / skipped`, and per-asset
+  failures log at WARNING (not INFO). The previous INFO-level
+  silent-skip is what hid "every image failed to import" for so
+  long.
+
+* **Planner emits `source_media_pool_size` +
+  `attached_media_per_blueprint` into the run trail** via
+  `state.log("plan_built", ...)`. When a user asks "why does my post
+  have an AI-generated image instead of my Notion picture?" — look
+  at this entry first. If `pool_size=0`, the source didn't yield
+  media; if `pool_size>0` but `attached=0`, the per-platform rules
+  rejected everything in the pool (kind mismatch).
+
 ## Media import
 
 * **Every external media URL that needs to outlive a single request

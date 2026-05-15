@@ -114,7 +114,22 @@ class PlannerAgent(Agent):
         # and skip the media-generation plugin entirely — using the
         # real source asset rather than synthesizing one.
         plan = _attach_source_media(plan, state.source_items)
-        state.log(self.name, "plan_built", blueprints=len(plan.blueprints), tokens=asdict(rsp.usage))
+        # Observability for "why does my post have an AI-generated image
+        # instead of my source image?" — emit pool + per-blueprint
+        # counts into the run trail so it's visible in the run-detail
+        # UI without needing to grep worker logs.
+        pool_size = len(_build_media_pool(state.source_items or []))
+        attached_per_bp = [
+            len(getattr(bp, "attached_media", None) or [])
+            for bp in plan.blueprints
+        ]
+        state.log(
+            self.name, "plan_built",
+            blueprints=len(plan.blueprints),
+            tokens=asdict(rsp.usage),
+            source_media_pool_size=pool_size,
+            attached_media_per_blueprint=attached_per_bp,
+        )
         return state.merge(plan=plan)
 
 

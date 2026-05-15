@@ -216,13 +216,17 @@ class NotionSource(ContentSource):
             if self.is_cms:
                 metadata.update(self._cms_metadata(props))
 
-            # Pull child blocks → extract image / video / file references →
-            # rehost in Supabase Storage so the URLs survive the ~1 hour
-            # Notion signed-URL expiry. Best-effort: import failures are
-            # logged but don't break the source iteration.
+            # Pull page cover + child blocks → extract image / video /
+            # file references → rehost in Supabase Storage so the URLs
+            # survive the ~1 hour Notion signed-URL expiry. Best-effort:
+            # import failures are logged but don't break the source
+            # iteration. We pass the WHOLE page dict (not just the id)
+            # so the extractor can access ``page.cover`` — that's where
+            # most Notion authors put the hero image, NOT in block
+            # children.
             media: tuple[MediaAsset, ...] = ()
             try:
-                media = await self._extract_page_media(page["id"])
+                media = await self._extract_page_media(page)
             except Exception as exc:                                    # noqa: BLE001
                 log.warning("notion_media_extract_failed",
                             page_id=page["id"], error=str(exc))
@@ -240,36 +244,59 @@ class NotionSource(ContentSource):
             )
 
     # ── media extraction ──────────────────────────────────────────────────
-    async def _extract_page_media(self, page_id: str) -> tuple[MediaAsset, ...]:
-        """Walk a Notion page's block children and return its
-        image/video/file attachments as MediaAsset objects whose URLs
+    async def _extract_page_media(self, page: dict) -> tuple[MediaAsset, ...]:
+        """Walk a Notion page's hero image + block tree and return its
+        image / video / file attachments as MediaAsset objects whose URLs
         point at our Supabase bucket (not the short-lived Notion URLs).
 
-        Notion block shapes we care about:
+        Sources we harvest, in priority order — earlier entries win
+        the "hero image" slot downstream:
+
+          1. **Page cover** (``page.cover``) — by far the most common
+             place Notion authors put a hero image. Lives on the page
+             object, NOT in block children, so the old block-only walk
+             completely missed it. This was the #1 reason "AI generated
+             a random image instead of using my Notion picture".
+          2. **Top-level image / video / file blocks** in document
+             order.
+          3. **One level deep** inside common container blocks —
+             column_list / column / toggle / callout / quote /
+             synced_block. Notion's editor frequently nests media in
+             these when authors use layouts.
+
+        Block payload shapes we accept (same form for ``image`` /
+        ``video`` / ``file``)::
 
             { type: "image",
-              image: {
-                type: "file",
-                file: { url: "https://prod-files-secure.s3...", expiry_time: "..." }
-              } }
+              image: { type: "file",
+                       file: { url: "https://prod-files-secure.s3...",
+                               expiry_time: "..." } } }
 
             { type: "image",
-              image: {
-                type: "external",
-                external: { url: "https://example.com/x.png" }
-              } }
+              image: { type: "external",
+                       external: { url: "https://example.com/x.png" } } }
 
-        Same shape for ``video`` and ``file``. We deliberately don't
-        recurse into nested block trees here — only top-level children —
-        because deep recursion would make a 50-row database fetch
-        prohibitively slow on the worker. Pages with media nested deep
-        in toggles can be flattened by the user.
+        Returns up to ``_MAX_MEDIA_PER_PAGE`` MediaAssets — the first
+        successful import is media[0], which the per-platform
+        selection in the Planner treats as the hero asset.
         """
         try:
             import httpx
         except ImportError:                                           # pragma: no cover
             return ()
 
+        page_id = page.get("id", "")
+
+        # ── 1. Page cover ─────────────────────────────────────────────
+        candidates: list[tuple[str, MediaKind, str]] = []
+        cover_src = _extract_file_url(page.get("cover"))
+        if cover_src:
+            candidates.append((cover_src, MediaKind.IMAGE, "cover"))
+
+        # ── 2 & 3. Block tree ─────────────────────────────────────────
+        # First page of children is usually enough — Notion pages with
+        # >100 top-level blocks are rare. If we need more we'd paginate
+        # via ``next_cursor``; not worth the latency budget here.
         async with httpx.AsyncClient(timeout=20.0) as client:
             r = await client.get(
                 f"https://api.notion.com/v1/blocks/{page_id}/children",
@@ -277,41 +304,28 @@ class NotionSource(ContentSource):
                 headers=self._headers(),
             )
             if r.status_code >= 400:
-                log.info("notion_blocks_fetch_failed",
-                         page_id=page_id, status=r.status_code,
-                         body=r.text[:200])
-                return ()
-            blocks = (r.json() or {}).get("results") or []
-
-        # Collect (source_url, kind) pairs in document order so the
-        # first image found becomes media[0] — natural mapping to "hero
-        # image" for downstream platform adapters.
-        candidates: list[tuple[str, MediaKind, str]] = []
-        for b in blocks:
-            btype = b.get("type")
-            if btype not in ("image", "video", "file"):
-                continue
-            payload = b.get(btype) or {}
-            if payload.get("type") == "file":
-                src = (payload.get("file") or {}).get("url")
-            elif payload.get("type") == "external":
-                src = (payload.get("external") or {}).get("url")
+                # Promoted INFO→WARNING — silent INFO logs were burying
+                # this when users wondered why their Notion images weren't
+                # showing up in posts.
+                log.warning("notion_blocks_fetch_failed",
+                            page_id=page_id, status=r.status_code,
+                            body=r.text[:200])
+                blocks: list[dict] = []
             else:
-                src = None
-            if not src:
-                continue
-            kind = (
-                MediaKind.VIDEO if btype == "video"
-                else MediaKind.IMAGE if btype == "image"
-                # ``file`` blocks could be anything — infer from URL
-                else (MediaKind.VIDEO if _looks_like_video(src) else MediaKind.IMAGE)
+                blocks = (r.json() or {}).get("results") or []
+
+            # Walk top-level blocks; recurse one level into common
+            # container blocks so a column-list layout doesn't hide
+            # everything.
+            await self._harvest_blocks(
+                client, blocks, candidates,
+                _MAX_MEDIA_PER_PAGE, allow_recursion=True,
             )
-            alt = _extract_block_caption(payload.get("caption"))
-            candidates.append((src, kind, alt))
-            if len(candidates) >= _MAX_MEDIA_PER_PAGE:
-                break
 
         if not candidates:
+            log.info("notion_no_media_found", page_id=page_id,
+                     has_cover=bool(page.get("cover")),
+                     blocks_fetched=len(blocks))
             return ()
 
         importer = MediaImportService()
@@ -322,6 +336,7 @@ class NotionSource(ContentSource):
         org_id = str(self.config.get("__org_id__") or "shared")
 
         assets: list[MediaAsset] = []
+        skipped = 0
         for src, kind, alt in candidates:
             try:
                 result = await importer.import_url(
@@ -333,10 +348,90 @@ class NotionSource(ContentSource):
                 ))
             except MediaImportError as exc:
                 # One bad asset shouldn't sink the page — drop it,
-                # log, keep going.
-                log.info("notion_media_skipped",
-                         page_id=page_id, src=src, error=str(exc))
+                # log, keep going. Promoted INFO→WARNING so users see
+                # this when investigating "why no source image?".
+                skipped += 1
+                log.warning("notion_media_import_failed",
+                            page_id=page_id, src=src[:120],
+                            error=str(exc))
+
+        # Summary log so a single line tells the operator what happened
+        # to this page's media. Shows up in the worker log right next
+        # to the per-asset failures above.
+        log.info("notion_media_summary", page_id=page_id,
+                 candidates=len(candidates),
+                 imported=len(assets), skipped=skipped)
         return tuple(assets)
+
+    async def _harvest_blocks(
+        self,
+        client,
+        blocks: list[dict],
+        candidates: list[tuple[str, MediaKind, str]],
+        max_items: int,
+        *,
+        allow_recursion: bool,
+    ) -> None:
+        """Append (src, kind, alt) tuples for every image/video/file
+        block found in ``blocks``. When ``allow_recursion`` is True,
+        descends ONE level into container blocks (column lists,
+        toggles, callouts, etc.) — that's the common Notion pattern
+        where authors put a hero image inside a two-column layout.
+        We cap at one level because deeper recursion would explode
+        latency on a 50-row database fetch."""
+        # Container block types whose children commonly hold media in
+        # real-world Notion layouts. Each of these has its own
+        # ``has_children=true`` flag and its own /blocks/{id}/children
+        # endpoint.
+        CONTAINER_TYPES = (
+            "column_list", "column", "toggle", "callout",
+            "quote", "synced_block",
+        )
+
+        for b in blocks:
+            if len(candidates) >= max_items:
+                return
+            btype = b.get("type")
+
+            if btype in ("image", "video", "file"):
+                payload = b.get(btype) or {}
+                src = _extract_file_url(payload)
+                if not src:
+                    continue
+                kind = (
+                    MediaKind.VIDEO if btype == "video"
+                    else MediaKind.IMAGE if btype == "image"
+                    # ``file`` blocks could be anything — infer from URL
+                    else (MediaKind.VIDEO if _looks_like_video(src) else MediaKind.IMAGE)
+                )
+                alt = _extract_block_caption(payload.get("caption"))
+                candidates.append((src, kind, alt))
+                continue
+
+            if (
+                allow_recursion
+                and btype in CONTAINER_TYPES
+                and b.get("has_children")
+            ):
+                try:
+                    rr = await client.get(
+                        f"https://api.notion.com/v1/blocks/{b['id']}/children",
+                        params={"page_size": 50},
+                        headers=self._headers(),
+                    )
+                    if rr.status_code >= 400:
+                        continue
+                    nested = (rr.json() or {}).get("results") or []
+                except Exception as exc:                                # noqa: BLE001
+                    log.info("notion_nested_fetch_failed",
+                             block_id=b.get("id"), error=str(exc))
+                    continue
+                # ``allow_recursion=False`` on the nested walk caps
+                # depth at one — children of children aren't visited.
+                await self._harvest_blocks(
+                    client, nested, candidates, max_items,
+                    allow_recursion=False,
+                )
 
     # ── CMS writeback ────────────────────────────────────────────────────
     async def mark_published(
@@ -479,6 +574,27 @@ def _render_page_text(page: dict) -> str:
         if isinstance(f, str) and f.strip():
             parts.append(f"{k}: {f}")
     return "\n".join(parts)
+
+
+def _extract_file_url(payload: Any) -> str | None:
+    """Pull the URL out of a Notion file-bearing payload — works for
+    page covers, image / video / file block payloads, and icon payloads.
+
+    Notion serves two flavors:
+      * ``{"type": "file",     "file":     {"url": "..."}}`` — uploaded
+      * ``{"type": "external", "external": {"url": "..."}}`` — pasted
+
+    Returns None for unsupported payload types (e.g. emoji icons,
+    which are ``{"type": "emoji", "emoji": "🚀"}`` and shouldn't be
+    treated as image URLs)."""
+    if not isinstance(payload, dict):
+        return None
+    ptype = payload.get("type")
+    if ptype == "file":
+        return (payload.get("file") or {}).get("url") or None
+    if ptype == "external":
+        return (payload.get("external") or {}).get("url") or None
+    return None
 
 
 # Filename-based heuristic for ambiguous ``file`` blocks. Real video
