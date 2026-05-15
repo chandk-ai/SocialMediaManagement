@@ -101,7 +101,17 @@ class TriggerService:
     # ── inbound webhook dispatch ─────────────────────────────────────
     def adapter_for(self, trigger: Trigger) -> TriggerAdapter:
         entry = self.registry.get(PluginKind.TRIGGER, trigger.plugin_name)
-        return entry.cls(config=trigger.config)
+        # Inject the trigger's org_id into the adapter config under the
+        # ``__org_id__`` convention. Adapters that need to call
+        # MediaImportService / Supabase Storage / any other org-scoped
+        # service (e.g. Telegram downloading attached photos) read this
+        # to write into the right tenant's storage path. Without it the
+        # adapter defaults to a literal "shared" prefix that the bucket
+        # policy rejects → user-attached media silently lost. The same
+        # convention is used by source plugins (Notion, Drive, etc.).
+        config = dict(trigger.config or {})
+        config["__org_id__"] = str(trigger.org_id)
+        return entry.cls(config=config)
 
     async def parse_payload(
         self, trigger: Trigger, payload: dict[str, Any], headers: dict[str, str], body: bytes,

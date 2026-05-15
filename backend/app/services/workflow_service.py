@@ -1401,9 +1401,12 @@ class WorkflowService:
                 if isinstance(m, dict) and m.get("url")
             )
             if forced_assets:
+                # DraftPost is a frozen dataclass, so we can't assign
+                # d.media = ... directly. Use object.__setattr__ to
+                # bypass the frozen guard — same idiom Hashtag uses
+                # in its __post_init__.
                 for d in final_state.drafts:
-                    # DraftPost.media is a tuple; replace wholesale.
-                    d.media = forced_assets
+                    object.__setattr__(d, "media", forced_assets)
                 run.append(AgentTraceEvent(
                     agent="review", event="feedback_media_applied",
                     payload={"count": len(forced_assets)},
