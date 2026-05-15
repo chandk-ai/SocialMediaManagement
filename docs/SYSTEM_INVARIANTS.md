@@ -115,6 +115,58 @@ prose belongs in module docstrings; this file is a checklist.
   a Page ID as the IG user id — that produces "Object 1074... does
   not exist" downstream.
 
+## Adaptive consumption — the source_items contract
+
+* **Core invariant (cross-source, cross-platform):** A source item is
+  permanently consumed *if and only if* a non-failed Post derived from
+  it exists. Otherwise the item is re-pickable on future runs. This
+  rule is uniform — applies to every source plugin (Notion, RSS,
+  Drive, YouTube, web scraper, …) and every platform plugin (LinkedIn,
+  IG, X, …) because it operates on the run/post layer below the
+  plugin boundary.
+
+* **The release SQL** lives in
+  ``SourceItemsService.release_unclaimed_for_run`` and joins
+  ``source_items`` to ``posts`` so a source_item is released whenever
+  its linked post is in ``status='failed'`` OR the link is NULL.
+  Releases set ``status='new'`` + null out all consumed_* columns so
+  the next run's Selector re-picks the item from scratch.
+
+* **Where the release is called from** (must stay in sync with all
+  terminal-failure transitions):
+  - ``WorkflowService.resume_after_review`` — REJECTED / EXPIRED /
+    CANCELLED branch
+  - ``WorkflowService._execute`` — outer ``except`` handler on
+    mid-run errors (FAILED transition)
+  - Future: durable_runner critique-rejected path. Note the durable
+    runner currently doesn't call ``mark_consumed`` either, so it has
+    no orphans to release — but if/when it gains eager-claim
+    semantics, it must call release too.
+
+* **The single chokepoint** is
+  ``WorkflowService._release_unclaimed_source_items(org_id, run,
+  reason)``. It writes an ``orchestrator.source_items_released``
+  AgentTraceEvent into the run trace with ``count`` and ``reason`` so
+  the operator can see in the run-detail UI exactly which items were
+  released and why. Release failure is logged but never propagates —
+  it must not block the run's terminal transition.
+
+* **What does NOT get released:**
+  - Items whose linked Post is in ``review`` / ``approved`` /
+    ``scheduled`` / ``published`` (active live commitment)
+  - Items consumed by a different run (only this run's claims)
+  - Items where no Post exists yet AND consumed_by_run_id is NULL
+    (never claimed)
+
+* **Known orphan-session bug:** Today the inline-path ``_execute``
+  flow can create Posts in ``status='review'`` without ever opening a
+  ReviewSession when ``review_channel`` is unset. Those Posts sit on
+  the Posts page forever waiting for a review that will never arrive.
+  Workaround: reject them via the orphan-Post review flow on the
+  ``/reviews`` page (already wired). Real fix: always open a
+  ReviewSession (default to in_app) when a workflow has
+  ``require_human_approval=true``.
+
 ## Telegram webhook — must point at backend, not at frontend proxy
 
 * **The Telegram `setWebhook` URL MUST be the FastAPI backend directly**

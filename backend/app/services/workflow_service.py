@@ -351,8 +351,53 @@ class WorkflowService:
                     p.status = PostStatus.FAILED
                     p.error = "review rejected"
                     await self.post_repo.update(p)
+            # Adaptive consumption: release any source_items this run
+            # tentatively claimed but never converted into a published
+            # post, so the next run can re-attempt the same content
+            # (possibly with a different angle or directive).
+            await self._release_unclaimed_source_items(
+                org_id=org_id, run=run, reason="review_rejected",
+            )
         await self.run_repo.update(run)
         return run
+
+    async def _release_unclaimed_source_items(
+        self, *, org_id: OrgId, run: WorkflowRun, reason: str,
+    ) -> int:
+        """Adaptive-consumption chokepoint. Calls
+        ``SourceItemsService.release_unclaimed_for_run`` to flip every
+        item where ``consumed_by_run_id == run.id`` AND no Post shipped
+        back to ``status='new'`` — making them re-pickable on future
+        runs. Records a trace event so the run's audit trail shows the
+        release, and emits an audit-log line for the operator dashboard.
+
+        Safe to call on runs that consumed nothing (returns 0). Safe to
+        call multiple times (idempotent at the SQL layer).
+
+        The ``reason`` argument is free-text routing context — it shows
+        up in the trace + audit so we can distinguish "review rejected"
+        from "run errored" from "review expired".
+        """
+        if self.source_items is None:
+            return 0
+        try:
+            released = await self.source_items.release_unclaimed_for_run(
+                org_id=org_id, run_id=run.id,
+            )
+        except Exception as exc:                                # noqa: BLE001
+            # Release failure must never prevent the terminal transition
+            # from completing. Log + audit it for triage, then move on.
+            log.warning("source_item_release_failed",
+                        run_id=str(run.id), reason=reason, error=str(exc))
+            return 0
+        if released > 0:
+            run.append(AgentTraceEvent(
+                agent="orchestrator", event="source_items_released",
+                payload={"count": released, "reason": reason},
+            ))
+            log.info("source_items_released",
+                     run_id=str(run.id), count=released, reason=reason)
+        return released
 
     # ── core execution ───────────────────────────────────────────────
     async def _execute(
@@ -587,6 +632,15 @@ class WorkflowService:
             log.exception("workflow_run_failed", run_id=str(run.id))
             run.error = str(exc)
             run.transition(RunStatus.FAILED)
+            # Adaptive consumption: release any source_items this run
+            # tentatively claimed but never converted to a published post,
+            # so a retry (manual or scheduled) can re-attempt the same
+            # content. Without this the item is silently dead-letter'd
+            # in the registry — see the rationale in
+            # ``_release_unclaimed_source_items``.
+            await self._release_unclaimed_source_items(
+                org_id=org_id, run=run, reason="run_failed",
+            )
             await self.run_repo.update(run)
             raise
 

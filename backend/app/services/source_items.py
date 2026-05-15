@@ -217,6 +217,69 @@ class SourceItemsService:
             )
             await s.commit()
 
+    async def release_unclaimed_for_run(
+        self,
+        org_id: OrgId,
+        run_id: RunId,
+    ) -> int:
+        """Release source_items that were tentatively claimed by ``run_id``
+        but never produced a live post. Adaptive-consumption hook.
+
+        Why this exists
+        ───────────────
+        The Selector calls ``mark_consumed`` BEFORE the agent loop runs —
+        an eager concurrency lock so two concurrent runs can't pick the
+        same item. But if the run subsequently terminates without
+        actually publishing anything (reject, expire, cancel, mid-run
+        error), the claim becomes a permanent silent skip on every
+        future run. The user's content is "stuck" with no signal as to
+        why.
+
+        The contract: a source item is permanently consumed IFF a
+        non-failed Post derived from it exists in the database. "Non-
+        failed" means status in {draft, review, approved, scheduled,
+        published} — any of those is a live commitment to publish that
+        content. A Post in status='failed' is dead; the source item
+        that produced it should be released for re-attempt.
+
+        Note ``consumed_by_post_id`` is set the moment a Post row is
+        inserted (REVIEW state), well before publish. So we can't gate
+        on ``consumed_by_post_id IS NULL`` alone — we have to join to
+        the posts table and check its current status. This way the
+        rule is uniform: terminal-without-success → release.
+
+        Idempotent — calling twice is harmless. Returns the number of
+        items released so callers can log it.
+        """
+        async with self._sm() as s:
+            res = await s.execute(
+                text("""
+                    UPDATE smms.source_items AS si
+                    SET status = 'new',
+                        consumed_at = NULL,
+                        consumed_by_run_id = NULL,
+                        consumed_by_post_id = NULL,
+                        skipped_reason = NULL
+                    WHERE si.org_id = :org_id
+                      AND si.consumed_by_run_id = :run_id
+                      AND (
+                          si.consumed_by_post_id IS NULL
+                          OR NOT EXISTS (
+                              SELECT 1
+                              FROM smms.posts AS p
+                              WHERE p.id = si.consumed_by_post_id
+                                AND p.status <> 'failed'
+                          )
+                      )
+                """),
+                {
+                    "org_id": UUID(str(org_id)),
+                    "run_id": UUID(str(run_id)),
+                },
+            )
+            await s.commit()
+            return int(res.rowcount or 0)
+
     async def mark_skipped(
         self,
         org_id: OrgId,

@@ -172,6 +172,49 @@ class InMemorySourceItemsService:
             row.status = "skipped"
             row.skipped_reason = (reason or "")[:1000]
 
+    async def release_unclaimed_for_run(
+        self,
+        org_id: OrgId,
+        run_id: RunId,
+        *,
+        post_status_lookup: dict | None = None,
+    ) -> int:
+        """Adaptive-consumption hook — release tentative claims when a
+        run terminates without producing a live post. See the Postgres
+        impl docstring for full rationale.
+
+        ``post_status_lookup`` is an optional ``{post_id: status}`` map
+        that the in-memory backend uses to mirror the Postgres impl's
+        join semantics (which can read posts.status inline via SQL).
+        When None, falls back to the simple
+        ``consumed_by_post_id IS NULL`` check — preserves test-suite
+        behavior where posts aren't materialized.
+        """
+        released = 0
+        async with self._lock:
+            for r in self._rows.values():
+                if not (
+                    r.org_id == str(org_id)
+                    and r.consumed_by_run_id == str(run_id)
+                ):
+                    continue
+                if r.consumed_by_post_id is None:
+                    should_release = True
+                elif post_status_lookup is not None:
+                    status = post_status_lookup.get(r.consumed_by_post_id)
+                    # No matching post = treat as released; failed = released.
+                    should_release = status is None or status == "failed"
+                else:
+                    should_release = False
+                if should_release:
+                    r.status = "new"
+                    r.consumed_at = None
+                    r.consumed_by_run_id = None
+                    r.consumed_by_post_id = None
+                    r.skipped_reason = None
+                    released += 1
+        return released
+
     # ── reads + tags ─────────────────────────────────────────────────────
     async def list_for_source(
         self, org_id: OrgId, source_id: SourceId,
