@@ -632,6 +632,9 @@ def _review_to_domain(orm: ReviewSessionORM) -> ReviewSession:
     # — default to [] so the domain object is always well-formed.
     excluded_raw = getattr(orm, "excluded_platform_ids", None) or []
     excluded_ids = [str(x) for x in excluded_raw if x]
+    # feedback_media added in migration 015 — same defensive default.
+    feedback_media_raw = getattr(orm, "feedback_media", None) or []
+    feedback_media = [m for m in feedback_media_raw if isinstance(m, dict)]
     return ReviewSession(
         id=ReviewId(orm.id), org_id=OrgId(orm.org_id),
         workflow_id=WorkflowId(orm.workflow_id), run_id=RunId(orm.run_id),
@@ -645,6 +648,7 @@ def _review_to_domain(orm: ReviewSessionORM) -> ReviewSession:
         quorum_required=int(getattr(orm, "quorum_required", 1) or 1),
         quorum_votes=votes,
         excluded_platform_ids=excluded_ids,
+        feedback_media=feedback_media,
     )
 
 
@@ -663,6 +667,9 @@ def _review_to_orm(d: ReviewSession) -> ReviewSessionORM:
             for v in d.quorum_votes
         ],
         excluded_platform_ids=[str(x) for x in (d.excluded_platform_ids or [])],
+        feedback_media=[
+            m for m in (d.feedback_media or []) if isinstance(m, dict) and m.get("url")
+        ],
     )
 
 

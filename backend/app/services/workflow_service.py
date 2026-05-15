@@ -276,18 +276,100 @@ class WorkflowService:
 
     async def run_from_trigger(
         self, *, trigger: Trigger, directive: str, initiator: str | None = None,
+        media_urls: list[str] | None = None,
     ) -> WorkflowRun:
         """Entry-point used by webhook handlers — kicks off a run with the
-        sender's free-text instruction (e.g. an inbound WhatsApp message)."""
+        sender's free-text instruction.
+
+        Ad-hoc mode: when the inbound event has attached media OR a
+        substantive directive (>= 6 words), the event itself becomes
+        the content brief. We synthesize a virtual SourceItem from
+        directive + media_urls and pass it into ``_execute`` as
+        ``inline_source_items`` — this skips fetching from the
+        configured sources entirely. So "DM the bot with this image
+        and a prompt" becomes a complete content surface that bypasses
+        Notion/RSS/etc.
+
+        Detection is automatic and per-event: a short text-only
+        message ("hi" / "post" / etc.) still falls back to the
+        source-driven flow, preserving the original behavior for
+        bots-as-cron triggers.
+        """
         # Quorum lives on the trigger's config; default 1 = first-tap-wins.
         quorum = int((trigger.config or {}).get("quorum_required", 1) or 1)
+        inline_items = self._maybe_synthesize_inline_item(
+            directive=directive, media_urls=media_urls or [],
+            sender=initiator,
+        )
         return await self._execute(
             org_id=trigger.org_id, workflow_id=trigger.workflow_id,
             directive=directive, trigger_id=trigger.id, initiator=initiator,
             review_channel=trigger.review_channel,
             review_recipient=trigger.review_recipient or initiator,
             quorum_required=max(1, quorum),
+            inline_source_items=inline_items,
         )
+
+    @staticmethod
+    def _maybe_synthesize_inline_item(
+        *, directive: str, media_urls: list[str], sender: str | None,
+    ) -> list | None:
+        """Build a virtual SourceItem from a trigger event when it's
+        rich enough to stand on its own. Returns None when the event
+        is short/empty AND has no media — in which case _execute
+        falls through to the normal source-fetch path.
+
+        Heuristics:
+          * Any attached media → ad-hoc (user clearly wants THIS image)
+          * Directive with >= 6 whitespace-split tokens → ad-hoc
+          * Otherwise → None (source-driven flow)
+        """
+        text = (directive or "").strip()
+        has_media = bool(media_urls)
+        if not has_media and len(text.split()) < 6:
+            return None
+
+        from app.domain.entities.source import SourceItem
+        from app.domain.value_objects.content import MediaAsset, MediaKind
+        from uuid import uuid4
+
+        # Each inbound event becomes its own unique virtual item. We
+        # don't try to dedupe — the user might intentionally DM
+        # "another version" of similar content and expect a new post.
+        external_id = f"telegram:{sender or 'anon'}:{uuid4().hex[:12]}"
+        title = (text.splitlines()[0] if text else "Telegram brief")[:140]
+
+        # Infer kind for each URL. ``_guess_kind`` would ideally live
+        # in a shared util but for now inline the heuristic — image
+        # by default unless extension says otherwise.
+        def _kind_for(u: str) -> MediaKind:
+            tail = (u or "").split("?", 1)[0].lower()
+            for ext in (".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"):
+                if tail.endswith(ext):
+                    return MediaKind.VIDEO
+            return MediaKind.IMAGE
+
+        media = tuple(
+            MediaAsset(url=u, kind=_kind_for(u), alt_text=None)
+            for u in media_urls if u
+        )
+        item = SourceItem(
+            external_id=external_id,
+            title=title,
+            body=text or "(no text provided — see attached media)",
+            url=None,
+            published_at=None,
+            media=media,
+            metadata={
+                # Marker so downstream agents / observability can
+                # tell this came from a chat trigger, not a Notion
+                # row. Helps with "why didn't this run pull from
+                # Notion?" debugging.
+                "origin": "telegram_ad_hoc",
+                "sender": sender,
+            },
+        )
+        return [item]
 
     async def resume_after_review(
         self, *, org_id: OrgId, run_id: RunId, review: ReviewSession,
@@ -352,7 +434,21 @@ class WorkflowService:
                                        payload={"feedback": review.feedback}))
             run.transition(RunStatus.EXECUTING)
             await self.run_repo.update(run)
-            await self._rerun_with_feedback(run, wf, platforms, review.feedback or "")
+            # Pass the ORIGINAL review's channel + recipient through so
+            # the post-revision session goes back to the SAME channel
+            # (Telegram, WhatsApp, Slack…) the reviewer is using. Before
+            # this fix, every revision round fell back to in_app
+            # silently — the reviewer would tap Revise on Telegram and
+            # then never hear back from the bot.
+            await self._rerun_with_feedback(
+                run, wf, platforms, review.feedback or "",
+                review_channel=review.channel,
+                review_recipient=review.recipient,
+                # Reviewer-supplied media (e.g. an image attached via
+                # Telegram reply) gets force-attached to the regenerated
+                # drafts, overriding the planner's source-media pick.
+                feedback_media=list(getattr(review, "feedback_media", []) or []),
+            )
         elif review.status in (ReviewStatus.REJECTED, ReviewStatus.EXPIRED, ReviewStatus.CANCELLED):
             run.append(AgentTraceEvent(agent="review", event="rejected",
                                        payload={"reason": review.feedback or review.status.value}))
@@ -469,6 +565,7 @@ class WorkflowService:
         review_channel: str | None = None,
         review_recipient: str | None = None,
         quorum_required: int = 1,
+        inline_source_items: list | None = None,
     ) -> WorkflowRun:
         wf = await self.repo.get(org_id, workflow_id)
         if not wf:
@@ -511,7 +608,24 @@ class WorkflowService:
             platforms = resolution.platforms
 
             run.transition(RunStatus.PLANNING)
-            items = await load_items(sources, self.registry)
+            # Ad-hoc mode short-circuit: if the caller (typically a
+            # chat trigger like Telegram) supplied a synthesized
+            # SourceItem from the user's brief, use that INSTEAD of
+            # fetching from the configured sources. The user's DM
+            # is the content; Notion/RSS/etc. don't get consulted.
+            # Traced so observability shows which path the run took.
+            if inline_source_items:
+                items = list(inline_source_items)
+                run.append(AgentTraceEvent(
+                    agent="orchestrator", event="ad_hoc_inline_items",
+                    payload={
+                        "count": len(items),
+                        "origin": items[0].metadata.get("origin")
+                        if items and items[0].metadata else None,
+                    },
+                ))
+            else:
+                items = await load_items(sources, self.registry)
 
             # ── Persistent registry: register every fetched item so the
             # selection layer can de-dup against prior runs and so /audit
@@ -1215,9 +1329,29 @@ class WorkflowService:
 
     async def _rerun_with_feedback(
         self, run: WorkflowRun, wf: Workflow, platforms: list, feedback: str,
+        *,
+        review_channel: str | None = None,
+        review_recipient: str | None = None,
+        feedback_media: list[dict] | None = None,
     ) -> None:
         """Re-execute the executor → evaluator → critique loop with the
-        reviewer's feedback as critique notes."""
+        reviewer's feedback as critique notes.
+
+        ``review_channel`` / ``review_recipient`` come from the ORIGINAL
+        review session that asked for revision — we route the new
+        draft back to the same channel so the conversation stays
+        coherent (tap Revise on Telegram → next draft also arrives on
+        Telegram, not silently in the web app). When None (e.g. older
+        callers), the post-revision session falls back to ``in_app``.
+
+        ``feedback_media`` is reviewer-supplied media (typically an
+        image attached to a Telegram reply with the revision text).
+        When provided, those URLs are FORCE-ATTACHED to every
+        regenerated draft, overriding whatever the planner picked from
+        source items. This is the "use this flyer for the image"
+        pattern: the reviewer's explicit choice always wins over
+        algorithmic selection.
+        """
         # Reuse the directive that started this run, plus the feedback.
         directive = (run.directive + "\nReviewer feedback: " + feedback).strip()
         items = await load_items(
@@ -1247,18 +1381,47 @@ class WorkflowService:
                 agent=ev["agent"], event=ev["event"],
                 payload={k: v for k, v in ev.items() if k not in ("agent","event")},
             ))
+        # Force-attach reviewer-supplied media to every regenerated
+        # draft BEFORE Posts are materialized. This implements the
+        # "use this flyer for the image" pattern — the reviewer's
+        # explicit choice replaces whatever the planner selected from
+        # source items. Each draft gets the same media set; if the
+        # workflow fans out to multiple platforms, each Post gets a
+        # copy. Per-platform validation (aspect ratio, size) happens
+        # downstream in the platform adapter.
+        if feedback_media:
+            from app.domain.value_objects.content import MediaAsset, MediaKind
+            forced_assets = tuple(
+                MediaAsset(
+                    url=m.get("url", ""),
+                    kind=MediaKind(m.get("kind") or "image"),
+                    alt_text=m.get("alt_text"),
+                )
+                for m in feedback_media
+                if isinstance(m, dict) and m.get("url")
+            )
+            if forced_assets:
+                for d in final_state.drafts:
+                    # DraftPost.media is a tuple; replace wholesale.
+                    d.media = forced_assets
+                run.append(AgentTraceEvent(
+                    agent="review", event="feedback_media_applied",
+                    payload={"count": len(forced_assets)},
+                ))
         posts = await self._persist_drafts(run, wf, platforms, final_state)
         # Always require another review round after a revision.
         run.transition(RunStatus.AWAITING_REVIEW)
         await self.run_repo.update(run)
-        # Surface the new drafts to the same reviewer.
+        # Surface the new drafts to the same reviewer via the same
+        # channel they used to ask for the revision. Falls back to
+        # in_app when the caller didn't pass through the channel
+        # (older code paths / tests).
         if self.review_repo:
             await self._open_review_session(
                 run=run, posts=posts, drafts=final_state.drafts,
                 platforms=platforms,
-                channel=run.trace and "in_app" or "in_app",
-                # Pull the original session's channel/recipient if available
-                recipient="",
+                channel=review_channel or "in_app",
+                recipient=review_recipient or "",
             )
 
     async def _publish(self, post: Post, draft: DraftPost, target) -> None:

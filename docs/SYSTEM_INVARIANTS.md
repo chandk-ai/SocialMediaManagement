@@ -115,6 +115,87 @@ prose belongs in module docstrings; this file is a checklist.
   a Page ID as the IG user id — that produces "Object 1074... does
   not exist" downstream.
 
+## Telegram as a complete content surface (ad-hoc mode)
+
+* **When a Telegram (or any chat) trigger event has attached media OR
+  a substantive directive (>=6 whitespace-separated tokens), the
+  event itself becomes the content brief.** No source fetching, no
+  Notion / RSS / Drive consultation. The user's DM is treated as the
+  whole input.
+
+* **Detection lives in `WorkflowService._maybe_synthesize_inline_item`.**
+  Returns a list with one synthetic `SourceItem` when the heuristic
+  fires; returns `None` otherwise. Auto-detect, per-event — no trigger
+  config flag needed. Short ad-hoc messages ("hi", "post") still fall
+  through to the source-driven path, preserving the "bot as cron"
+  pattern.
+
+* **The synthetic SourceItem shape:**
+  - `external_id = "telegram:{sender}:{uuid_suffix}"` — unique per
+    event (no dedupe across sends — re-sending the same content
+    intentionally produces another post)
+  - `title` = first line of directive (capped at 140 chars)
+  - `body` = full directive text
+  - `media` = `MediaAsset` tuple built from `media_urls` (already
+    re-hosted in Supabase by the Telegram adapter)
+  - `metadata.origin = "telegram_ad_hoc"` — observability marker so
+    "why didn't this pull from Notion?" debugging is trivial
+
+* **`_execute` short-circuits source loading when
+  `inline_source_items` is non-empty.** Trace event
+  `orchestrator.ad_hoc_inline_items` is appended so the run-detail
+  UI shows the path clearly. Configured sources on the workflow are
+  not even contacted.
+
+* **What this enables:**
+  - "DM the bot with prompt + image → publish that post" (no web UI
+    needed, no Notion needed)
+  - The same workflow can serve BOTH scheduled-from-Notion AND
+    ad-hoc-from-Telegram patterns — they coexist on one workflow
+    because the auto-detect picks the right mode per event.
+
+## Reviewer feedback with attached media
+
+* **When a reviewer replies to a draft with text + an image (typically
+  via Telegram reply), the image is downloaded, re-hosted in Supabase,
+  and force-attached to the regenerated post.** No more "I attached
+  a flyer but the post ignored it." Persisted on the ReviewSession as
+  ``feedback_media`` (see migration ``015_review_feedback_media.sql``).
+
+* **Telegram-specific media flow:**
+  1. `TelegramTriggerAdapter._parse_message` extracts each photo /
+     video / document's `file_id` from the message payload
+  2. For each file_id, calls Telegram's `getFile` API to get
+     `file_path`, then downloads the bytes from the Telegram file CDN
+  3. Hands the bytes to `MediaImportService.import_bytes` which
+     re-hosts in the org's Supabase Storage bucket and returns a
+     stable URL that outlives Telegram's ~1-hour CDN window
+  4. Real URLs land in `TriggerEvent.media_urls` — never the
+     `tg-file:<id>` placeholders the old code emitted
+
+* **Webhook → review correlation:** when the inbound message is a
+  reply to a pending review (Telegram's `reply_to_message`), or even
+  when it's a fresh message but a review session is the latest pending
+  for that channel+sender, `webhooks._handle_messaging_webhook` passes
+  `ev.media_urls` to `ReviewService.apply_reply(... feedback_media=...)`.
+
+* **`_rerun_with_feedback` is where the override happens.** After the
+  agent re-runs with the feedback text as critique notes, it walks
+  every regenerated `DraftPost.media` and REPLACES it with
+  `MediaAsset` objects built from `feedback_media`. The planner's
+  source-media selection is overridden — explicit reviewer choice
+  always wins over algorithmic selection.
+
+* **Per-platform validation still applies post-override.** If the
+  reviewer attaches an image that's the wrong aspect ratio for IG
+  Reels, the IG adapter's `validate()` will still reject it. This
+  is by design — we don't want a bad image silently published, even
+  if the reviewer chose it.
+
+* **Trace event** `review.feedback_media_applied` lands in the run
+  trace with the count of media URLs applied, so the operator can
+  see in the run-detail UI that the reviewer's images flowed through.
+
 ## Review session lifecycle — adaptive channel resolution + dispatch
 
 * **Single source of truth for review channel + recipient:** the

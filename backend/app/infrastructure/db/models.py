@@ -217,6 +217,11 @@ class ReviewSessionORM(Base):
     # publish loop and to mark the corresponding sibling Posts as
     # CANCELLED. Empty list means publish everything in drafts_snapshot.
     excluded_platform_ids: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    # Reviewer-supplied media — see migrations/015_review_feedback_media.sql.
+    # Populated when the reviewer attaches images / videos to a revision
+    # message (typically via Telegram reply). _rerun_with_feedback uses
+    # these to override the planner's media selection.
+    feedback_media: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
 
 
 class PostORM(Base):

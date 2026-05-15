@@ -67,7 +67,7 @@ class TelegramTrigger(TriggerAdapter):
         # Regular text messages (DM, group, channel_post)
         msg = payload.get("message") or payload.get("channel_post")
         if msg:
-            ev = self._parse_message(payload, msg)
+            ev = await self._parse_message(payload, msg)
             if ev is not None:
                 events.append(ev)
 
@@ -79,7 +79,7 @@ class TelegramTrigger(TriggerAdapter):
         return events
 
     # ── helpers ──────────────────────────────────────────────────────
-    def _parse_message(self, payload: dict[str, Any], msg: dict[str, Any]) -> TriggerEvent | None:
+    async def _parse_message(self, payload: dict[str, Any], msg: dict[str, Any]) -> TriggerEvent | None:
         chat_id = str((msg.get("chat") or {}).get("id", ""))
         if not self._allowed(chat_id):
             log.info("telegram_chat_not_allowed", chat_id=chat_id)
@@ -92,11 +92,20 @@ class TelegramTrigger(TriggerAdapter):
             from_user.get("username")
             and f"@{from_user['username']}"
         ) or None
+        # Ingest any attached photos / videos / documents through
+        # Telegram's getFile API → Supabase Storage so the URLs survive
+        # outside the 1-hour file-CDN window AND can be attached to the
+        # downstream Post's media. Without this, the executor sees
+        # ``tg-file:<id>`` placeholder strings it can't fetch and the
+        # user's image is silently dropped.
+        file_ids = self._extract_file_ids(msg)
+        org_id = str(self.config.get("__org_id__") or "shared")
+        media_urls = await self._ingest_telegram_files(file_ids, org_id=org_id)
         return TriggerEvent(
             trigger_id=payload.get("trigger_id", ""),
             sender=chat_id,
             directive=text,
-            media_urls=self._extract_media(msg),
+            media_urls=media_urls,
             raw=msg,
             in_reply_to=str(in_reply_to) if in_reply_to is not None else None,
             actor_id=actor_id,
@@ -130,17 +139,98 @@ class TelegramTrigger(TriggerAdapter):
         )
 
     @staticmethod
-    def _extract_media(msg: dict[str, Any]) -> list[str]:
-        out: list[str] = []
+    def _extract_file_ids(msg: dict[str, Any]) -> list[tuple[str, str]]:
+        """Return a list of (kind, file_id) tuples for every media
+        attachment on a Telegram message. ``kind`` is the original
+        message field — ``photo``/``video``/``document``/``audio``/
+        ``voice`` — used later to set MediaKind. For ``photo``, we
+        pick the LAST entry in the size array (highest resolution).
+        """
+        out: list[tuple[str, str]] = []
         for k in ("photo", "video", "document", "audio", "voice"):
             v = msg.get(k)
-            if isinstance(v, list) and v:                # photo: array of sizes
+            if isinstance(v, list) and v:
                 file_id = v[-1].get("file_id")
-                if file_id: out.append(f"tg-file:{file_id}")
+                if file_id:
+                    out.append((k, file_id))
             elif isinstance(v, dict):
                 file_id = v.get("file_id")
-                if file_id: out.append(f"tg-file:{file_id}")
+                if file_id:
+                    out.append((k, file_id))
         return out
+
+    async def _ingest_telegram_files(
+        self, file_specs: list[tuple[str, str]], *, org_id: str,
+    ) -> list[str]:
+        """Download every Telegram file via getFile + the file CDN and
+        re-host into Supabase Storage. Returns the resulting public URLs.
+
+        Two-step Telegram API:
+          1. ``getFile?file_id=X`` → ``{ok: true, result: {file_path: "photos/Y.jpg"}}``
+          2. ``GET https://api.telegram.org/file/bot<TOKEN>/<file_path>``
+             returns the raw bytes.
+
+        Per-file failures are logged but never raised — one bad file
+        shouldn't sink an entire workflow run. Empty list when there's
+        no bot_token configured (dry-run mode for tests) so the rest
+        of the parse path still works.
+        """
+        if not file_specs:
+            return []
+        token = self._resolve_token()
+        if not token:
+            log.info("telegram_media_dry_run_no_token", count=len(file_specs))
+            return []
+        try:
+            from app.services.media_import import MediaImportService
+        except ImportError:                                       # pragma: no cover
+            return []
+        importer = MediaImportService()
+        urls: list[str] = []
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                for kind, file_id in file_specs:
+                    try:
+                        meta = await client.get(
+                            f"https://api.telegram.org/bot{token}/getFile",
+                            params={"file_id": file_id},
+                        )
+                        meta.raise_for_status()
+                        file_path = (meta.json().get("result") or {}).get("file_path")
+                        if not file_path:
+                            log.warning("telegram_getfile_no_path",
+                                        file_id=file_id[:24])
+                            continue
+                        # Download the raw bytes — Telegram's file CDN
+                        # serves them at a separate, token-scoped URL.
+                        dl = await client.get(
+                            f"https://api.telegram.org/file/bot{token}/{file_path}",
+                        )
+                        dl.raise_for_status()
+                        # Content-Type is usually right on Telegram's
+                        # CDN; the importer also sniffs the filename.
+                        ct = (dl.headers.get("content-type", "")
+                              .split(";")[0].strip().lower())
+                        result = await importer.import_bytes(
+                            org_id=org_id,
+                            data=dl.content,
+                            content_type=ct or "application/octet-stream",
+                            filename=file_path.rsplit("/", 1)[-1],
+                            source_url=None,
+                        )
+                        urls.append(result.url)
+                    except Exception as exc:                       # noqa: BLE001
+                        log.warning(
+                            "telegram_file_ingest_failed",
+                            file_id=file_id[:24], kind=kind,
+                            error=str(exc)[:200],
+                        )
+        except Exception as exc:                                   # noqa: BLE001
+            log.warning("telegram_media_pipeline_failed", error=str(exc))
+        if urls:
+            log.info("telegram_media_ingested",
+                     count=len(urls), of=len(file_specs))
+        return urls
 
     def _allowed(self, chat_id: str) -> bool:
         allow = self.config.get("allowed_chat_ids") or []

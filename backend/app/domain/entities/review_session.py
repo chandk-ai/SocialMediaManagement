@@ -78,6 +78,14 @@ class ReviewSession:
     # snapshot. The set lives on the session (not on each Post) so a
     # revision-and-re-review cycle preserves exclusions across rounds.
     excluded_platform_ids: list[str] = field(default_factory=list)
+    # ── Reviewer-supplied media on revision feedback ──────────────────
+    # When a reviewer replies with "use this flyer" + an attached
+    # image, the image URL (already re-hosted via MediaImportService —
+    # never the short-lived upstream URL) lands here. ``_rerun_with_
+    # feedback`` reads this and force-attaches these media onto the
+    # regenerated DraftPosts, overriding the planner's source-media
+    # selection. Each entry: {url, kind, alt_text}.
+    feedback_media: list[dict] = field(default_factory=list)
 
     # ── single-vote decisions (used by 1:1 channels) ─────────────────
     def approve(self) -> None:

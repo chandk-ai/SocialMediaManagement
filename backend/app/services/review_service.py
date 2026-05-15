@@ -27,6 +27,18 @@ from app.repositories.ports import ReviewSessionRepository
 log = get_logger(__name__)
 
 
+def _guess_kind(url: str) -> str:
+    """Best-effort MediaKind guess from a URL extension. Defaults to
+    ``image`` because that's by far the most common reviewer attachment.
+    Used when the inbound channel (Telegram, WhatsApp, …) doesn't tell
+    us whether the file is image / video / audio in a structured way."""
+    u = (url or "").split("?", 1)[0].lower()
+    for ext in (".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"):
+        if u.endswith(ext):
+            return "video"
+    return "image"
+
+
 class ReviewService:
     def __init__(self, repo: ReviewSessionRepository, registry: PluginRegistry) -> None:
         self.repo = repo
@@ -60,6 +72,7 @@ class ReviewService:
         in_reply_to: str | None = None,
         actor_id: str | None = None,
         actor_handle: str | None = None,
+        feedback_media: list[str] | None = None,
     ) -> tuple[ReviewSession | None, ReviewDecision]:
         """Apply a reviewer reply.
 
@@ -81,6 +94,15 @@ class ReviewService:
             log.info("review_reply_unmatched", channel=channel, sender=sender,
                      decision=decision.kind.value)
             return None, decision
+        # Persist any reviewer-supplied media (e.g. an image attached
+        # to a Telegram reply with revision feedback). Store BEFORE
+        # applying the decision so resume_after_review sees a fully
+        # populated session when it reads back.
+        if feedback_media:
+            review.feedback_media = [
+                {"url": u, "kind": _guess_kind(u), "alt_text": None}
+                for u in feedback_media if u
+            ]
         # Quorum path — only kicks in when the session was created with
         # quorum_required > 1 AND the channel gave us an actor_id.
         if review.quorum_required > 1 and actor_id:

@@ -135,6 +135,12 @@ async def _handle_messaging_webhook(
             channel=channel, sender=ev.sender,
             reply_text=ev.directive, in_reply_to=ev.in_reply_to,
             actor_id=ev.actor_id, actor_handle=ev.actor_handle,
+            # Telegram (and any future channel that supports attachments)
+            # surfaces media as ev.media_urls. The trigger adapter has
+            # already re-hosted these to Supabase URLs, so they're safe
+            # to persist on the review session — the regenerated post
+            # will pick them up via _rerun_with_feedback.
+            feedback_media=list(ev.media_urls or []),
         )
         if review is not None:
             log.info("trigger_routed_to_review",
@@ -147,8 +153,13 @@ async def _handle_messaging_webhook(
             continue
 
         # Otherwise it's a fresh request — start a new workflow run.
+        # Pass through the event's media URLs so ad-hoc mode (Telegram
+        # DM + image → post about that, Notion bypassed) can synthesize
+        # a virtual SourceItem from the user's brief instead of pulling
+        # from configured sources.
         run = await wf_svc.run_from_trigger(
             trigger=trigger, directive=ev.directive, initiator=ev.sender,
+            media_urls=list(ev.media_urls or []),
         )
         started.append(run.id)
     return WebhookAck(received=len(events), started=started)
