@@ -2,6 +2,8 @@
 including the human-in-the-loop checkpoint when configured."""
 from __future__ import annotations
 
+from datetime import datetime
+
 from app.adapters.platforms.base import PostPayload, SocialPlatform
 from app.adapters.review_channels.base import DecisionKind
 from app.agents.base import AgentDecision, AgentState
@@ -32,6 +34,7 @@ from app.repositories.ports import (
     PostRepository,
     ReviewSessionRepository,
     SourceRepository,
+    TriggerRepository,
     WorkflowRepository,
     WorkflowRunRepository,
 )
@@ -120,6 +123,7 @@ class WorkflowService:
         llm_credentials: "LlmCredentialsService | None" = None,
         llm_usage: "LlmUsageService | None" = None,
         source_items: "SourceItemsService | None" = None,
+        trigger_repo: TriggerRepository | None = None,
     ) -> None:
         self.repo = repo
         self.run_repo = run_repo
@@ -135,6 +139,13 @@ class WorkflowService:
         # de-dup; the selection layer still runs but treats every item
         # as new).
         self.source_items = source_items
+        # Adaptive review channel inheritance — when a manual /run from
+        # the web UI doesn't specify a review_channel, we look up an
+        # active Trigger bound to this workflow that has one configured
+        # and inherit it. So configuring "send drafts to Telegram" once
+        # on the trigger covers BOTH the trigger-fired path AND the
+        # manual-run path. None on memory backends — fallback to in_app.
+        self.trigger_repo = trigger_repo
 
     async def _resolve_llm_api_key(self, org_id: OrgId, provider: str) -> str | None:
         """Look up the org's stored API key for the chosen provider, falling
@@ -361,6 +372,57 @@ class WorkflowService:
         await self.run_repo.update(run)
         return run
 
+    async def _inherit_review_channel_from_trigger(
+        self,
+        *,
+        org_id: OrgId,
+        workflow_id: WorkflowId,
+        fallback_channel: str | None,
+        fallback_recipient: str | None,
+    ) -> tuple[str | None, str | None]:
+        """When the caller didn't pass a review_channel (typical for
+        web-UI ``Run Now``), look up an active Trigger bound to this
+        workflow that has a review channel configured and adopt its
+        channel + recipient. This makes the "configure review channel
+        once on the trigger, applies everywhere" pattern actually work.
+
+        Tie-breaker when multiple triggers are bound: pick the most
+        recently created active one with a review_channel set. That
+        matches user mental model ("the one I configured last is what
+        I want to use"). If no match, return the fallbacks unchanged.
+
+        Memory backends without trigger_repo skip the lookup
+        gracefully.
+        """
+        if self.trigger_repo is None:
+            return fallback_channel, fallback_recipient
+        try:
+            triggers = await self.trigger_repo.list(org_id)
+        except Exception:                                       # noqa: BLE001
+            return fallback_channel, fallback_recipient
+        # Sort by created_at desc — newest first — so a freshly
+        # configured trigger wins if multiple are bound.
+        matching = [
+            t for t in triggers
+            if t.workflow_id == workflow_id
+               and t.is_active
+               and t.review_channel
+        ]
+        matching.sort(
+            key=lambda t: getattr(t, "created_at", None) or datetime.min,
+            reverse=True,
+        )
+        if not matching:
+            return fallback_channel, fallback_recipient
+        chosen = matching[0]
+        log.info("review_channel_inherited_from_trigger",
+                 workflow_id=str(workflow_id),
+                 trigger_id=str(chosen.id),
+                 channel=chosen.review_channel)
+        return chosen.review_channel, (
+            fallback_recipient or chosen.review_recipient
+        )
+
     async def _release_unclaimed_source_items(
         self, *, org_id: OrgId, run: WorkflowRun, reason: str,
     ) -> int:
@@ -413,6 +475,21 @@ class WorkflowService:
             raise ValueError("workflow not found")
         if wf.status not in (WorkflowStatus.ACTIVE, WorkflowStatus.DRAFT):
             raise ValueError(f"workflow is {wf.status.value}, cannot run")
+
+        # Adaptive review channel inheritance ─────────────────────────
+        # The web-UI "Run Now" endpoint calls svc.run() with no
+        # review_channel set, so without this lookup the run would
+        # silently default to in_app with an empty recipient — review
+        # session never opens, no Telegram DM, no entry on the Reviews
+        # page. By inheriting from a bound active Trigger we get the
+        # same review channel/recipient for both trigger-fired AND
+        # manual runs, with one source of truth.
+        if not review_channel:
+            review_channel, review_recipient = await self._inherit_review_channel_from_trigger(
+                org_id=org_id, workflow_id=wf.id,
+                fallback_channel=review_channel,
+                fallback_recipient=review_recipient,
+            )
 
         run = WorkflowRun.create(
             org_id=org_id, workflow_id=wf.id,
@@ -619,6 +696,7 @@ class WorkflowService:
                 await self.run_repo.update(run)
                 await self._open_review_session(
                     run=run, posts=posts, drafts=final_state.drafts,
+                    platforms=platforms,
                     channel=review_channel or "in_app",
                     recipient=review_recipient or "",
                     quorum_required=quorum_required,
@@ -1024,9 +1102,23 @@ class WorkflowService:
         plugin name to display and no way to identify *which*
         account is being reviewed for plugins with multiple accounts.
         """
-        if self.review_repo is None or not recipient:
-            log.info("review_skipped_no_repo_or_recipient",
-                     channel=channel, has_repo=bool(self.review_repo))
+        if self.review_repo is None:
+            log.info("review_skipped_no_repo", channel=channel)
+            return None
+        # Channel-specific recipient requirement. Outbound channels
+        # (telegram, whatsapp, instagram, slack, email) need a recipient
+        # — without one there's nowhere to send the message. The in_app
+        # channel persists to DB only and is visible on the Reviews
+        # page regardless of recipient, so we allow an empty recipient
+        # there to support web-UI "Run Now" flows.
+        OUTBOUND_CHANNELS = {"telegram", "whatsapp", "instagram", "slack", "email"}
+        if channel in OUTBOUND_CHANNELS and not recipient:
+            log.warning(
+                "review_skipped_outbound_channel_missing_recipient",
+                channel=channel,
+                hint="Configure review_recipient on the trigger OR pass "
+                     "review_recipient via the API, or fall back to channel=in_app.",
+            )
             return None
         wf_id = run.workflow_id
         snapshot = _build_drafts_snapshot(posts, drafts, platforms)
@@ -1036,14 +1128,90 @@ class WorkflowService:
             quorum_required=max(1, int(quorum_required or 1)),
         )
         await self.review_repo.add(review)
-        # The dispatch (sending the message via WhatsApp/IG/etc.) is handled
-        # by the API layer via ReviewService — keep this method side-effect-free
-        # for testability.
-        run.append(AgentTraceEvent(agent="review", event="session_created",
-                                   payload={"channel": channel,
-                                            "recipient": recipient,
-                                            "session_id": str(review.id)}))
+        # Outbound dispatch — actually send the draft to the channel
+        # (Telegram bot message, WhatsApp message, Slack post, etc).
+        # Before this fix, the session existed in DB but no Telegram
+        # message was ever sent — the user had no idea a review was
+        # waiting. ``in_app`` skips dispatch (no external surface).
+        if channel != "in_app":
+            await self._dispatch_review_message(review=review, snapshot=snapshot)
+        # Trace event so the run timeline shows a session opened, with
+        # enough metadata for "why didn't I get a notification?" triage.
+        run.append(AgentTraceEvent(
+            agent="review", event="session_created",
+            payload={"channel": channel,
+                     "recipient": recipient,
+                     "session_id": str(review.id),
+                     "sent_message_ref": review.sent_message_ref},
+        ))
         return review
+
+    async def _dispatch_review_message(
+        self, *, review: ReviewSession, snapshot: list[dict],
+    ) -> None:
+        """Look up the channel adapter for ``review.channel`` and call
+        ``send_for_review`` so the actual outbound message goes out.
+
+        Why this lives on WorkflowService and not ReviewService:
+        ``_open_review_session`` is already the orchestrator hook that
+        knows the platforms + drafts list. Calling the adapter inline
+        keeps the "open a review = persist + dispatch" semantics
+        single-step. Dispatch failures are logged but never re-raised —
+        if Telegram is briefly down, the session still exists in DB
+        and the user can decide via the web Reviews page (or we can
+        retry the dispatch later).
+
+        Mutates ``review.sent_message_ref`` with the channel's id
+        (Telegram message_id, WhatsApp wamid, etc) for later
+        correlation when the user replies.
+        """
+        from app.adapters.review_channels.base import ReviewMessage
+        try:
+            # Channel adapter config (bot tokens etc.) lives on the
+            # Trigger row. Find the active Trigger that matches this
+            # workflow + review_channel and use its config. Fall back to
+            # empty config so the adapter's env-var path still works
+            # (TELEGRAM_BOT_TOKEN etc.) for single-bot installs.
+            channel_config: dict = {}
+            if self.trigger_repo is not None:
+                try:
+                    triggers = await self.trigger_repo.list(review.org_id)
+                    candidate = next(
+                        (t for t in triggers
+                         if t.workflow_id == review.workflow_id
+                         and t.is_active
+                         and t.review_channel == review.channel),
+                        None,
+                    )
+                    if candidate is not None:
+                        channel_config = dict(candidate.config or {})
+                except Exception as exc:                          # noqa: BLE001
+                    log.info("review_dispatch_trigger_lookup_failed",
+                             review_id=str(review.id), error=str(exc))
+            entry = self.registry.get(PluginKind.REVIEW_CHANNEL, review.channel)
+            adapter = entry.cls(config=channel_config)
+            msg = ReviewMessage(
+                headline="Please review this draft before publishing",
+                drafts=list(snapshot),
+                metadata={"quorum_required": review.quorum_required},
+            )
+            ref = await adapter.send_for_review(review.recipient, msg)
+            if ref:
+                review.sent_message_ref = ref
+                # Persist the message_ref so inbound webhooks can thread
+                # the reviewer's reply back to this session.
+                try:
+                    await self.review_repo.update(review)        # type: ignore[union-attr]
+                except Exception as exc:                          # noqa: BLE001
+                    log.warning("review_session_ref_persist_failed",
+                                review_id=str(review.id), error=str(exc))
+        except Exception as exc:                                  # noqa: BLE001
+            # Never fail the run because of dispatch — session is in DB
+            # and the web Reviews page still surfaces it.
+            log.warning("review_dispatch_failed",
+                        review_id=str(review.id),
+                        channel=review.channel,
+                        error=str(exc))
 
     async def _rerun_with_feedback(
         self, run: WorkflowRun, wf: Workflow, platforms: list, feedback: str,

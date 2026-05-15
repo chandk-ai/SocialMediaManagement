@@ -232,6 +232,11 @@ def get_workflow_service() -> WorkflowService:
         llm_credentials=_get_llm_credentials_service(),
         llm_usage=_get_llm_usage_service(),
         source_items=_get_source_items_service(),
+        # Adaptive review channel inheritance — see WorkflowService
+        # docstring. When the web-UI Run Now doesn't pass a review
+        # channel, the service falls back to whichever active Trigger
+        # has one configured on this workflow.
+        trigger_repo=repos["trigger"],
     )
 
 

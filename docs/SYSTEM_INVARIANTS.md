@@ -115,6 +115,57 @@ prose belongs in module docstrings; this file is a checklist.
   a Page ID as the IG user id — that produces "Object 1074... does
   not exist" downstream.
 
+## Review session lifecycle — adaptive channel resolution + dispatch
+
+* **Single source of truth for review channel + recipient:** the
+  Trigger row. Both trigger-fired runs AND manual "Run Now" from the
+  web UI inherit the channel/recipient from the bound trigger. Set it
+  once on the trigger, applies everywhere.
+
+* **Inheritance order** in ``WorkflowService._execute``:
+  1. ``review_channel`` explicitly passed to ``_execute`` (e.g. by
+     ``run_from_trigger`` or a campaign override) — highest precedence
+  2. ``_inherit_review_channel_from_trigger`` — finds the most
+     recently created active Trigger bound to this workflow that has
+     ``review_channel`` set, adopts its channel + recipient
+  3. Workflow-level fallback: if ``require_human_approval=true`` and
+     none of the above resolved a channel, default to ``in_app`` with
+     empty recipient (the Reviews page surfaces it)
+
+* **`_open_review_session` does TWO things:** persist the
+  ``ReviewSession`` row AND dispatch the outbound message via the
+  channel adapter. Before this fix the method only persisted —
+  ``ReviewService.request_review`` (the dispatch fn) was defined but
+  never called anywhere. Result: sessions existed in DB but no
+  Telegram / WhatsApp / Slack messages were ever sent. Symptom:
+  ``smms.review_sessions`` row exists with empty ``sent_message_ref``;
+  user sees draft on Posts page but never receives a notification.
+
+* **Recipient gating** — outbound channels (telegram, whatsapp,
+  instagram, slack, email) require a recipient; an empty one logs a
+  warning and skips the session. The ``in_app`` channel allows empty
+  recipient (the Reviews page is the surface). This lets web-UI "Run
+  Now" succeed without forcing the user to configure a trigger first.
+
+* **Channel adapter config (bot tokens, etc.) is pulled from the
+  matching Trigger's config at dispatch time.** Never hard-code or
+  pass channel secrets through API calls. The adapter falls back to
+  its env-var resolver (``TELEGRAM_BOT_TOKEN``, etc.) when no trigger
+  matches — useful for single-bot self-hosted deployments.
+
+* **Dispatch failure is logged but never re-raised.** A briefly down
+  Telegram bot must not fail the workflow run — the session is
+  already in DB and the user can still decide via the web Reviews
+  page. ``sent_message_ref`` stays empty in that case; a retry path
+  can be added later if needed.
+
+* **Trace event** ``review.session_created`` is appended to the run
+  trace on every session open, with channel + recipient +
+  ``sent_message_ref``. Use this in the run-detail UI to triage
+  "why didn't I get a notification?" — empty ref means dispatch
+  failed; missing event entirely means session creation was skipped
+  (check the log line ``review_skipped_*``).
+
 ## Adaptive consumption — the source_items contract
 
 * **Core invariant (cross-source, cross-platform):** A source item is
