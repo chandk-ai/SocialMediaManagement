@@ -48,6 +48,56 @@ class TriggerService:
     async def get_any(self, trigger_id: TriggerId) -> Trigger | None:
         return await self.repo.get_any(trigger_id)
 
+    async def update(
+        self, *, org_id: OrgId, trigger_id: TriggerId,
+        display_name: str | None = None,
+        config: dict | None = None,
+        allowed_senders: list[str] | None = None,
+        review_channel: str | None = None,
+        review_recipient: str | None = None,
+        is_active: bool | None = None,
+    ) -> Trigger | None:
+        """Partial update. Caller is responsible for org-scoping —
+        we re-fetch via the org-scoped ``repo.get`` to enforce it
+        defensively. Returns the updated trigger or ``None`` if not found.
+
+        Note: ``plugin_name`` is intentionally not editable. Changing
+        the underlying plugin would invalidate the config schema. The
+        delete + recreate path is the supported migration.
+        """
+        t = await self.repo.get(org_id, trigger_id)
+        if t is None:
+            return None
+        # Validate the (possibly new) review channel before persisting —
+        # better to 422 here than fail at the next workflow run.
+        if review_channel is not None and review_channel != "":
+            self.registry.get(PluginKind.REVIEW_CHANNEL, review_channel)
+        if display_name is not None:
+            t.display_name = display_name
+        if config is not None:
+            t.config = dict(config)            # full replacement (see schema docstring)
+        if allowed_senders is not None:
+            t.allowed_senders = list(allowed_senders)
+        if review_channel is not None:
+            # Empty string clears it; non-empty sets it.
+            t.review_channel = review_channel or None
+        if review_recipient is not None:
+            t.review_recipient = review_recipient or None
+        if is_active is not None:
+            t.is_active = bool(is_active)
+        return await self.repo.update(t)
+
+    async def delete(self, org_id: OrgId, trigger_id: TriggerId) -> bool:
+        """Returns True if the trigger existed and was deleted, False
+        if it didn't exist. The org-scoped ``repo.get`` guards against
+        cross-tenant deletes (we never touch a trigger from another
+        org's row)."""
+        t = await self.repo.get(org_id, trigger_id)
+        if t is None:
+            return False
+        await self.repo.delete(org_id, trigger_id)
+        return True
+
     # ── inbound webhook dispatch ─────────────────────────────────────
     def adapter_for(self, trigger: Trigger) -> TriggerAdapter:
         entry = self.registry.get(PluginKind.TRIGGER, trigger.plugin_name)
@@ -56,6 +106,15 @@ class TriggerService:
     async def parse_payload(
         self, trigger: Trigger, payload: dict[str, Any], headers: dict[str, str], body: bytes,
     ) -> list[TriggerEvent]:
+        # Honor the pause flag — when a trigger is paused, ACK the
+        # inbound webhook (so the upstream provider doesn't retry) but
+        # don't dispatch any events. The audit trail captures the
+        # paused-skip via the trigger_paused_skip log line.
+        if not trigger.is_active:
+            log.info("trigger_paused_skip",
+                     trigger_id=str(trigger.id),
+                     plugin=trigger.plugin_name)
+            return []
         adapter = self.adapter_for(trigger)
         if not await adapter.verify_signature(headers, body):
             log.warning("trigger_signature_invalid", trigger_id=str(trigger.id))

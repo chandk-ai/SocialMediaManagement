@@ -703,6 +703,16 @@ class SupabaseTriggerRepository(_Base):
             await s.commit()
         return t
 
+    async def delete(self, org_id: OrgId, trigger_id: TriggerId) -> None:
+        async with self._sm() as s:
+            await s.execute(
+                delete(TriggerORM).where(
+                    TriggerORM.id == trigger_id,
+                    TriggerORM.org_id == org_id,
+                ),
+            )
+            await s.commit()
+
 
 class SupabaseReviewSessionRepository(_Base):
     async def add(self, r: ReviewSession) -> ReviewSession:

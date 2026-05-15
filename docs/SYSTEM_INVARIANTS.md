@@ -115,6 +115,44 @@ prose belongs in module docstrings; this file is a checklist.
   a Page ID as the IG user id — that produces "Object 1074... does
   not exist" downstream.
 
+## Triggers — edit / pause / delete
+
+* **`PATCH /triggers/{id}` is the single edit surface.** Accepts
+  ``display_name``, ``config``, ``allowed_senders``, ``review_channel``,
+  ``review_recipient``, ``is_active`` — any field omitted is preserved.
+  ``plugin_name`` and ``workflow_id`` are intentionally NOT editable
+  here: changing the plugin invalidates the config schema, and
+  rebinding to a different workflow is a separate workflow-editor
+  concern. Delete + recreate is the supported migration for both.
+
+* **`config` is replaced wholesale**, never merged. Plugin configs
+  are plugin-specific JSON shapes with required fields — a merge can
+  leave a half-populated config that crashes the adapter at fire-time.
+  The frontend always sends the full intended config.
+
+* **`is_active=false` honored at every entry point.**
+  ``TriggerService.parse_payload`` returns `[]` immediately when the
+  trigger is paused — the webhook still ACKs (so upstream providers
+  don't retry) but nothing dispatches. Scheduler tick reads
+  workflow-level schedules, not triggers, so it's unaffected. Adding
+  a new trigger-driven dispatch path? It MUST check
+  ``trigger.is_active`` first.
+
+* **DELETE is hard-delete.** No soft-delete column. Deleting a webhook
+  trigger means its URL stops working immediately — there's no grace
+  period. UI guides users toward Pause for reversible disable. Admin
+  role required (not just editor).
+
+* **TriggerRepository.delete** added to the port + both
+  InMemoryTriggerRepository and SupabaseTriggerRepository. The
+  SQL delete is org-scoped, so cross-tenant attempts no-op.
+
+* **Audit-log diff omits secret-bearing fields.** The
+  ``trigger.update`` audit entry records ``config_replaced=true``
+  rather than the full config diff, because configs commonly carry
+  bot tokens, webhook secrets, etc. The UI's preview also masks any
+  key matching ``(token|secret|password|api_key|apikey)``.
+
 ## Reviews & per-target control
 
 * **`drafts_snapshot` is keyed per-Post, not per-draft.** Each entry

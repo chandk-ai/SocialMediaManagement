@@ -210,6 +210,10 @@ class InMemoryTriggerRepository:
         self._global[t.id] = t
         return t
 
+    async def delete(self, org_id: OrgId, trigger_id: TriggerId) -> None:
+        self._s.for_org(org_id).pop(trigger_id, None)
+        self._global.pop(trigger_id, None)
+
 
 class InMemoryReviewSessionRepository:
     def __init__(self) -> None:
