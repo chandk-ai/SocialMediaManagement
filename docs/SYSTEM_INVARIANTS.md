@@ -115,6 +115,59 @@ prose belongs in module docstrings; this file is a checklist.
   a Page ID as the IG user id — that produces "Object 1074... does
   not exist" downstream.
 
+## Reviews & per-target control
+
+* **`drafts_snapshot` is keyed per-Post, not per-draft.** Each entry
+  carries ``post_id``, ``platform_id``, ``plugin_name``,
+  ``display_name``, ``account_handle``, plus the draft body + media.
+  The Reviews UI uses this to render a target chip per account; the
+  decision endpoint uses ``post_id`` / ``platform_id`` to cancel
+  specific siblings on exclusion. Built by ``_build_drafts_snapshot``
+  in ``workflow_service.py``.
+
+* **Exclusions live on the ReviewSession** as ``excluded_platform_ids``
+  (JSONB column, see migration ``014_review_exclusions.sql``). The
+  decision payload (``DecisionIn.excluded_platform_ids``) writes there
+  BEFORE ``_apply`` runs. ``resume_after_review`` reads from the
+  session — never from the request — so a Telegram-initiated decision
+  and a web-UI decision behave identically. Persisting on the session
+  also means a Revise round preserves the prior exclusion set across
+  the re-review.
+
+* **Approve gate.** Excluding every target on a session blocks the
+  Approve button on the web UI (Reject is the correct action). The
+  backend doesn't enforce this — it would publish to zero platforms
+  silently — so the UI guardrail is the only check. If you add a
+  second client (mobile app, CLI), enforce it server-side.
+
+* **Cancellation trail.** When a reviewer excludes accounts, the
+  corresponding sibling Posts transition to FAILED with
+  ``error="excluded by reviewer at approval"`` plus a
+  ``review.platform_excluded`` ``AgentTraceEvent`` on the run. Don't
+  silently drop them — orphaned REVIEW-status Posts confuse the
+  Posts dashboard.
+
+* **Posts API serializer denormalizes target metadata.**
+  ``platform_plugin_name``, ``platform_display_name``,
+  ``account_handle`` are resolved server-side via a batched lookup
+  (``_batch_platforms_for_posts``). Adding a new mutation route on
+  posts MUST resolve the platform before returning ``_to_out(p,
+  plat)`` — otherwise the response loses the target chip and the
+  UI re-renders without it until the next list-refresh.
+
+* **Posts API ``?run_id=`` filter** is applied at the API layer (not
+  the service / repo) so the InMemory + Supabase repo contracts
+  don't gain a new parameter. Fine for current volume; revisit if a
+  single run produces >5k posts.
+
+* **Telegram review message lists targets explicitly.** ``_build_body``
+  emits one bullet per draft showing platform + ``account_handle``,
+  plus a "*Publishing to N accounts. Use the web UI to skip specific
+  ones.*" instruction. Per-target inline-button toggling on Telegram
+  is intentionally not implemented yet — stateful callback handling
+  requires changes to the bot webhook + a "selected set" stored on
+  the session. Direct reviewers to the web UI for now.
+
 ## Source plugin inputs
 
 * **Every source plugin whose config carries an identifier that the

@@ -1,0 +1,32 @@
+-- 014_review_exclusions.sql
+-- Adds ``excluded_platform_ids`` to review_sessions so reviewers can
+-- skip specific target accounts when approving a multi-platform post.
+--
+-- Why this exists
+-- ─────────────────────
+-- The Reviews + Posts UI exposes per-target chips (LinkedIn @brand-us,
+-- IG @brand-eu, X @brand-jp, …) for each review session. The reviewer
+-- can untick any of those before clicking Approve to skip publishing
+-- to that specific account. ``WorkflowService.resume_after_review``
+-- reads this list and:
+--   1. Filters those platforms out of the publish loop, and
+--   2. Marks the corresponding sibling Posts as CANCELLED with an
+--      audit-log entry so the trail shows the exclusion explicitly.
+--
+-- Why a column instead of stashing in drafts_snapshot
+-- ─────────────────────
+-- drafts_snapshot is content (text / hashtags / media — what's being
+-- published). Exclusions are decision state (what the reviewer chose).
+-- Mixing them would make replay-from-snapshot semantics murky, and
+-- queries like "find reviews where the reviewer excluded > N accounts"
+-- become awkward. A dedicated JSONB column keeps the two concerns
+-- separate.
+--
+-- Stored as JSONB (not text[]) for consistency with quorum_votes and
+-- to allow future growth (e.g. per-exclusion timestamps + actor ids
+-- for full audit fidelity).
+--
+-- Idempotent.
+
+ALTER TABLE smms.review_sessions
+    ADD COLUMN IF NOT EXISTS excluded_platform_ids JSONB NOT NULL DEFAULT '[]'::jsonb;

@@ -26,6 +26,7 @@ def _to_out(r) -> ReviewOut:
         drafts_snapshot=list(r.drafts_snapshot),
         feedback=r.feedback, decision_at=r.decision_at,
         expires_at=r.expires_at, created_at=r.created_at,
+        excluded_platform_ids=list(getattr(r, "excluded_platform_ids", None) or []),
     )
 
 
@@ -56,6 +57,7 @@ async def decide(
     review = await review_svc.apply_decision_via_api(
         org_id=org_id, review_id=ReviewId(review_id),
         kind=kind, feedback=body.feedback,
+        excluded_platform_ids=[str(x) for x in body.excluded_platform_ids],
     )
     # Resume the workflow run based on the decision.
     await wf_svc.resume_after_review(org_id=org_id, run_id=RunId(review.run_id), review=review)

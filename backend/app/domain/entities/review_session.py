@@ -69,6 +69,15 @@ class ReviewSession:
     # ── Group quorum support ─────────────────────────────────────────
     quorum_required: int = 1                # 1 = first vote wins (default)
     quorum_votes: list[QuorumVote] = field(default_factory=list)
+    # ── Per-target exclusions ─────────────────────────────────────────
+    # IDs (as strings — UUID's __str__ form) of Platform rows the
+    # reviewer chose to skip when approving. ``resume_after_review``
+    # in WorkflowService reads this and (a) filters those platforms
+    # out of the publish loop, (b) marks the corresponding sibling
+    # Posts as CANCELLED. Empty list = publish to everything in the
+    # snapshot. The set lives on the session (not on each Post) so a
+    # revision-and-re-review cycle preserves exclusions across rounds.
+    excluded_platform_ids: list[str] = field(default_factory=list)
 
     # ── single-vote decisions (used by 1:1 channels) ─────────────────
     def approve(self) -> None:

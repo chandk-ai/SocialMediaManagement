@@ -80,6 +80,12 @@ export type Post = {
   workflow_id: string;
   run_id: string;
   platform_id: string;
+  // Resolved server-side from the Platform row so the UI can render
+  // a target chip (logo + display name + @handle) without an extra
+  // round-trip per post. Nullable when the platform has been deleted.
+  platform_plugin_name?: string | null;
+  platform_display_name?: string | null;
+  account_handle?: string | null;
   text: string;
   hashtags: string[];
   status: 'draft' | 'review' | 'approved' | 'scheduled' | 'published' | 'failed';
@@ -106,6 +112,30 @@ export type Trigger = {
   last_fired_at: string | null;
 };
 
+/**
+ * One entry per Post in a workflow run's review. The backend builds
+ * this server-side from (Post, DraftPost, Platform) tuples — see
+ * ``_build_drafts_snapshot`` in workflow_service.py. Per-Post (rather
+ * than per-draft) granularity matters when a single workflow fans out
+ * to multiple accounts of the same platform (e.g. one LinkedIn draft
+ * → three connected LI company pages).
+ *
+ * post_id / platform_id are present on entries produced after the
+ * May 2026 schema enrichment; older sessions only have platform_name.
+ * The UI must tolerate both shapes (defensive ?? fallbacks).
+ */
+export type ReviewDraftSnapshot = {
+  post_id?: string;
+  platform_id?: string;
+  plugin_name?: string;
+  platform_name: string;            // legacy alias for plugin_name
+  display_name?: string;
+  account_handle?: string | null;
+  text: string;
+  hashtags: string[];
+  media?: Array<{ url: string; kind?: string; alt_text?: string | null }>;
+};
+
 export type Review = {
   id: string;
   run_id: string;
@@ -113,9 +143,13 @@ export type Review = {
   channel: string;
   recipient: string;
   status: 'pending' | 'approved' | 'revision_requested' | 'rejected' | 'expired' | 'cancelled';
-  drafts_snapshot: Array<{ platform_name: string; text: string; hashtags: string[] }>;
+  drafts_snapshot: ReviewDraftSnapshot[];
   feedback: string | null;
   decision_at: string | null;
   expires_at: string | null;
   created_at: string;
+  // Platform IDs the reviewer has previously excluded — UI uses this
+  // to keep the user's selection state across page refreshes and poll
+  // intervals. Sent back unchanged on the next decision.
+  excluded_platform_ids?: string[];
 };

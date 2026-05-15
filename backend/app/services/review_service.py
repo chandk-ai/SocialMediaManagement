@@ -94,10 +94,18 @@ class ReviewService:
     async def apply_decision_via_api(
         self, *, org_id: OrgId, review_id: ReviewId,
         kind: DecisionKind, feedback: str = "",
+        excluded_platform_ids: list[str] | None = None,
     ) -> ReviewSession:
         review = await self.repo.get(org_id, review_id)
         if review is None:
             raise ValueError("review not found")
+        # Persist exclusions on the session BEFORE applying the decision —
+        # ``resume_after_review`` reads ``review.excluded_platform_ids``
+        # when computing the publish set, so the order matters. We don't
+        # union with prior exclusions: the latest decision is the source
+        # of truth (user can change their mind by submitting again).
+        if excluded_platform_ids is not None:
+            review.excluded_platform_ids = list(excluded_platform_ids)
         decision = ReviewDecision(kind=kind, feedback=feedback)
         await self._apply(review, decision)
         return review

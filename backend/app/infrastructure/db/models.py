@@ -211,6 +211,12 @@ class ReviewSessionORM(Base):
     # Group-quorum support — see migrations/006_review_quorum.sql.
     quorum_required: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     quorum_votes: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    # Per-target exclusions — see migrations/014_review_exclusions.sql.
+    # IDs of Platform rows the reviewer chose to skip when approving.
+    # ``WorkflowService.resume_after_review`` reads this to filter the
+    # publish loop and to mark the corresponding sibling Posts as
+    # CANCELLED. Empty list means publish everything in drafts_snapshot.
+    excluded_platform_ids: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
 
 
 class PostORM(Base):

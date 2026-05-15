@@ -628,6 +628,10 @@ def _review_to_domain(orm: ReviewSessionORM) -> ReviewSession:
             kind=str(v.get("kind", "")),
             at=str(v.get("at", "")),
         ))
+    # excluded_platform_ids may be missing on legacy rows (pre-014 migration)
+    # — default to [] so the domain object is always well-formed.
+    excluded_raw = getattr(orm, "excluded_platform_ids", None) or []
+    excluded_ids = [str(x) for x in excluded_raw if x]
     return ReviewSession(
         id=ReviewId(orm.id), org_id=OrgId(orm.org_id),
         workflow_id=WorkflowId(orm.workflow_id), run_id=RunId(orm.run_id),
@@ -640,6 +644,7 @@ def _review_to_domain(orm: ReviewSessionORM) -> ReviewSession:
         created_at=orm.created_at,
         quorum_required=int(getattr(orm, "quorum_required", 1) or 1),
         quorum_votes=votes,
+        excluded_platform_ids=excluded_ids,
     )
 
 
@@ -657,6 +662,7 @@ def _review_to_orm(d: ReviewSession) -> ReviewSessionORM:
              "kind": v.kind, "at": v.at}
             for v in d.quorum_votes
         ],
+        excluded_platform_ids=[str(x) for x in (d.excluded_platform_ids or [])],
     )
 
 

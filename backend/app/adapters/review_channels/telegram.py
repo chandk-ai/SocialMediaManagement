@@ -80,10 +80,49 @@ class TelegramReviewChannel(ReviewChannel):
 
     @staticmethod
     def _build_body(recipient: str, message: ReviewMessage) -> dict[str, Any]:
-        preview = "\n\n".join(
-            f"*{_md_escape(d.get('platform_name',''))}*\n{(_md_escape(d.get('text') or ''))[:800]}"
-            for d in message.drafts[:3]
-        )
+        drafts = message.drafts or []
+        # Targets summary — one bullet per draft showing platform +
+        # @account_handle so the reviewer immediately sees the full
+        # fan-out before reading the text. Falls back to the legacy
+        # ``platform_name`` field for snapshots produced before the
+        # May 2026 enrichment.
+        target_lines = []
+        for d in drafts:
+            label = _md_escape(
+                d.get("display_name")
+                or d.get("plugin_name")
+                or d.get("platform_name")
+                or ""
+            )
+            handle = d.get("account_handle")
+            line = f"• *{label}*"
+            if handle:
+                line += f" · {_md_escape(str(handle))}"
+            target_lines.append(line)
+        targets_block = "\n".join(target_lines) if target_lines else ""
+
+        # Per-target draft preview. Show the platform + handle on each
+        # tile header so a quick scan tells you which account each
+        # excerpt is for. Cap text length per draft to keep the
+        # message under Telegram's 4096 char limit even with many
+        # targets.
+        per_target_chars = 600 if len(drafts) >= 4 else 800
+        preview_chunks = []
+        for d in drafts[:5]:
+            header = _md_escape(
+                d.get("display_name")
+                or d.get("plugin_name")
+                or d.get("platform_name")
+                or ""
+            )
+            if d.get("account_handle"):
+                header += f" · {_md_escape(str(d['account_handle']))}"
+            body = _md_escape(d.get("text") or "")[:per_target_chars]
+            preview_chunks.append(f"*{header}*\n{body}")
+        preview = "\n\n".join(preview_chunks)
+        if len(drafts) > 5:
+            preview += f"\n\n_(+{len(drafts) - 5} more targets)_"
+
         # Surface the quorum requirement up-front so reviewers know whether
         # one tap is enough or whether they're voting in a group. The
         # message.metadata dict is populated by ReviewService before send.
@@ -92,7 +131,15 @@ class TelegramReviewChannel(ReviewChannel):
         header = _md_escape(message.headline)
         if quorum > 1:
             header += f"\n_Quorum: any {quorum} ✅ to publish · any 1 ❌ to veto_"
-        text = f"*{header}*\n\n{preview}"[:4000]
+        targets_count = len(drafts)
+        if targets_count > 1:
+            header += f"\n_Publishing to *{targets_count}* accounts. Use the web UI to skip specific ones._"
+        text_parts = [f"*{header}*"]
+        if targets_block:
+            text_parts.append("*Targets:*\n" + targets_block)
+        if preview:
+            text_parts.append(preview)
+        text = "\n\n".join(text_parts)[:4000]
         return {
             "chat_id": recipient,
             "text": text,

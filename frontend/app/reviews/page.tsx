@@ -22,10 +22,11 @@ import { Textarea } from '@/components/ui/Input';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { Sidebar } from '@/components/layout/Sidebar';
 import { TopBar } from '@/components/layout/TopBar';
+import { PlatformIcon, type PlatformName } from '@/components/ui/PlatformIcon';
 import { useApi, api, ApiError } from '@/lib/api/client';
-import type { Review, Post } from '@/lib/api/types';
+import type { Review, ReviewDraftSnapshot, Post } from '@/lib/api/types';
 import { MessageSquare, Check, X, Edit3, AlertTriangle, Send } from 'lucide-react';
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { mutate } from 'swr';
 import { formatDateTime } from '@/lib/utils';
 
@@ -73,12 +74,45 @@ function ReviewCard({ review }: { review: Review }) {
   const [feedback, setFeedback] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  // Per-target inclusion state — keyed by platform_id. Defaults to
+  // "include everything except the ones the backend already has as
+  // excluded" so a page refresh preserves a prior partial selection.
+  // Entries without a platform_id (legacy snapshots pre-enrichment)
+  // can't be excluded individually — they just publish as a group.
+  const initiallyExcluded = useMemo(
+    () => new Set(review.excluded_platform_ids ?? []),
+    [review.excluded_platform_ids],
+  );
+  const [excluded, setExcluded] = useState<Set<string>>(initiallyExcluded);
+
+  function toggleTarget(platformId?: string) {
+    if (!platformId) return;     // legacy snapshot — no granular control
+    setExcluded(prev => {
+      const next = new Set(prev);
+      next.has(platformId) ? next.delete(platformId) : next.add(platformId);
+      return next;
+    });
+  }
+
+  const targetableCount = review.drafts_snapshot.filter(d => d.platform_id).length;
+  const includedCount = review.drafts_snapshot.filter(
+    d => d.platform_id && !excluded.has(d.platform_id),
+  ).length;
+  // Block "Approve" when the reviewer has excluded ALL targets — that
+  // would be a no-op publish with no auditable intent. They should
+  // use Reject instead.
+  const allExcluded = targetableCount > 0 && includedCount === 0;
 
   async function decide(kind: 'approve' | 'revise' | 'reject') {
     setBusy(kind); setErr(null);
     try {
       await api.post(`/reviews/${review.id}/decision`, {
-        kind, feedback: kind === 'revise' ? feedback : '',
+        kind,
+        feedback: kind === 'revise' ? feedback : '',
+        // Always include — backend persists this on the session so
+        // the choice survives a revision round. On reject/revise the
+        // value is informational; on approve it gates the publish.
+        excluded_platform_ids: Array.from(excluded),
       });
       await mutate('/reviews');
       await mutate('/posts?status=review');
@@ -102,21 +136,30 @@ function ReviewCard({ review }: { review: Review }) {
         <Badge tone="warning">{review.status}</Badge>
       </div>
 
-      <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+      {/* Target summary line: how many accounts will receive the post,
+          out of the fan-out total. Updates live as the reviewer toggles. */}
+      {targetableCount > 0 && (
+        <div className="mt-3 text-xs text-ink-600">
+          Publishing to <span className="font-medium">{includedCount}</span> of{' '}
+          <span className="font-medium">{targetableCount}</span> target accounts.
+          Untick a card to skip that account.
+        </div>
+      )}
+
+      <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
         {review.drafts_snapshot.map((d, i) => (
-          <div key={i} className="rounded-xl border border-ink-200 p-3">
-            <div className="text-xs text-ink-500 mb-1">{d.platform_name}</div>
-            <div className="text-sm whitespace-pre-line break-words">{cleanText(d.text)}</div>
-            {d.hashtags?.length ? (
-              <div className="text-xs text-accent mt-2">{d.hashtags.join(' ')}</div>
-            ) : null}
-          </div>
+          <DraftTile
+            key={d.post_id ?? `${d.platform_name}-${i}`}
+            draft={d}
+            excluded={d.platform_id ? excluded.has(d.platform_id) : false}
+            onToggle={() => toggleTarget(d.platform_id)}
+          />
         ))}
       </div>
 
       <div className="mt-4">
         <label className="block text-xs text-ink-500 mb-1">
-          Feedback (only used for "Revise")
+          Feedback (used for "Revise" to regenerate, or for the audit trail on Reject)
         </label>
         <Textarea
           value={feedback}
@@ -140,14 +183,104 @@ function ReviewCard({ review }: { review: Review }) {
           variant="outline"
           disabled={busy !== null || !feedback}
           onClick={() => decide('revise')}
+          title={!feedback ? 'Enter feedback above to enable Revise' : 'Send back to the agent with feedback'}
         >
-          <Edit3 size={14} /> {busy === 'revise' ? 'Sending…' : 'Revise'}
+          <Edit3 size={14} /> {busy === 'revise' ? 'Sending…' : 'Revise with feedback'}
         </Button>
-        <Button disabled={busy !== null} onClick={() => decide('approve')}>
-          <Check size={14} /> {busy === 'approve' ? 'Approving…' : 'Approve & Post'}
+        <Button
+          disabled={busy !== null || allExcluded}
+          onClick={() => decide('approve')}
+          title={allExcluded ? 'You\'ve excluded every target — Reject instead' : 'Approve and publish to selected targets'}
+        >
+          <Check size={14} />{' '}
+          {busy === 'approve'
+            ? 'Approving…'
+            : targetableCount > 0
+              ? `Approve & Post to ${includedCount}`
+              : 'Approve & Post'}
         </Button>
       </div>
     </Card>
+  );
+}
+
+/* ───────── Per-target draft tile with include/exclude toggle ─────────── */
+
+function DraftTile({
+  draft,
+  excluded,
+  onToggle,
+}: {
+  draft: ReviewDraftSnapshot;
+  excluded: boolean;
+  onToggle: () => void;
+}) {
+  const pluginName = draft.plugin_name ?? draft.platform_name;
+  const displayName = draft.display_name ?? draft.platform_name;
+  const canToggle = !!draft.platform_id;
+
+  return (
+    <label
+      className={
+        'rounded-xl border p-3 transition flex flex-col gap-2 ' +
+        (canToggle ? 'cursor-pointer ' : '') +
+        (excluded
+          ? 'border-ink-200 bg-ink-50 opacity-60'
+          : 'border-ink-200 hover:border-accent/40 bg-bg-card')
+      }
+    >
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <PlatformIcon name={pluginName as PlatformName} size={18} />
+          <div className="min-w-0">
+            <div className="text-sm font-medium truncate">{displayName}</div>
+            {draft.account_handle && (
+              <div className="text-[11px] text-ink-500 truncate">{draft.account_handle}</div>
+            )}
+          </div>
+        </div>
+        {canToggle && (
+          <input
+            type="checkbox"
+            className="h-4 w-4 accent-accent shrink-0"
+            checked={!excluded}
+            onChange={onToggle}
+            aria-label={excluded ? 'Include this target' : 'Skip this target'}
+            onClick={e => e.stopPropagation()}
+          />
+        )}
+      </div>
+      <div className="text-sm whitespace-pre-line break-words">{cleanText(draft.text)}</div>
+      {draft.hashtags?.length ? (
+        <div className="text-xs text-accent">{draft.hashtags.join(' ')}</div>
+      ) : null}
+      {draft.media?.length ? (
+        <div className="flex gap-1 flex-wrap">
+          {draft.media.slice(0, 3).map((m, mi) =>
+            m.kind === 'video' ? (
+              <span
+                key={mi}
+                className="text-[10px] uppercase tracking-wider px-2 py-1 rounded bg-ink-100 text-ink-600"
+              >
+                video
+              </span>
+            ) : (
+              <img
+                key={mi}
+                src={m.url}
+                alt={m.alt_text ?? ''}
+                className="h-12 w-12 rounded object-cover"
+              />
+            ),
+          )}
+        </div>
+      ) : null}
+      {excluded && (
+        <div className="text-[11px] font-medium text-ink-500 uppercase tracking-wider">
+          Skipping this account
+        </div>
+      )}
+    </label>
   );
 }
 
@@ -182,6 +315,16 @@ function PostReviewCard({ post }: { post: Post }) {
         </div>
         <Badge tone="warning">review</Badge>
       </div>
+
+      {/* Target chip — same look as the per-target tiles on session-based
+          reviews so the reviewer always knows where this is going. */}
+      {post.platform_plugin_name && (
+        <div className="mt-3 inline-flex items-center gap-2 rounded-md border border-ink-200 px-2 py-1 text-xs">
+          <PlatformIcon name={post.platform_plugin_name as PlatformName} size={14} />
+          <span className="font-medium">{post.platform_display_name ?? post.platform_plugin_name}</span>
+          {post.account_handle && <span className="text-ink-500">· {post.account_handle}</span>}
+        </div>
+      )}
 
       <div className="mt-4">
         <p className="text-sm whitespace-pre-line break-words">{cleanText(post.text)}</p>

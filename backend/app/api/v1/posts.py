@@ -18,7 +18,14 @@ from app.services.post_service import PostService
 router = APIRouter()
 
 
-def _to_out(p) -> PostOut:
+def _to_out(p, platform=None) -> PostOut:
+    """Serialize a Post into the API DTO.
+
+    ``platform`` is the resolved Platform row for ``p.platform_id`` — pass
+    it when you've already fetched it (the list endpoint batches lookups
+    to avoid N+1). When unset, the target-display fields are returned as
+    None and the UI falls back to the platform_id UUID.
+    """
     # ``p.media`` is a list of MediaAsset dataclasses (or already-dict
     # shapes when the supabase repo hasn't fully rehydrated). Handle
     # both gracefully so list_posts doesn't 500 on legacy rows.
@@ -38,7 +45,11 @@ def _to_out(p) -> PostOut:
             })
     return PostOut(
         id=p.id, workflow_id=p.workflow_id, run_id=p.run_id,
-        platform_id=p.platform_id, text=p.text,
+        platform_id=p.platform_id,
+        platform_plugin_name=getattr(platform, "plugin_name", None) if platform else None,
+        platform_display_name=getattr(platform, "display_name", None) if platform else None,
+        account_handle=getattr(platform, "account_handle", None) if platform else None,
+        text=p.text,
         hashtags=[h.value for h in p.hashtags], status=p.status.value,
         scheduled_for=p.scheduled_for, published_at=p.published_at,
         external_post_id=p.external_post_id, error=p.error, created_at=p.created_at,
@@ -46,14 +57,44 @@ def _to_out(p) -> PostOut:
     )
 
 
+async def _batch_platforms_for_posts(
+    org_id: OrgId, posts: list,
+) -> dict:
+    """Fetch every unique Platform referenced by ``posts`` in one pass and
+    return ``{platform_id: Platform}``. Avoids the N+1 that would happen
+    if ``_to_out`` resolved per-post.
+
+    The platform repo doesn't expose a bulk fetch method, so we still do
+    one DB call per unique platform — but the de-dup means a 50-post run
+    with 3 distinct platforms costs 3 lookups, not 50."""
+    from app.api.deps import _build_repos
+    platform_repo = _build_repos()["platform"]
+    seen: dict = {}
+    for p in posts:
+        if p.platform_id in seen:
+            continue
+        try:
+            seen[p.platform_id] = await platform_repo.get(org_id, p.platform_id)
+        except Exception:                                            # noqa: BLE001
+            seen[p.platform_id] = None
+    return seen
+
+
 @router.get("", response_model=list[PostOut])
 async def list_posts(
     status: str | None = Query(None, description="draft|review|approved|scheduled|published|failed"),
+    run_id: UUID | None = Query(None, description="Filter to posts from a single workflow run — used for sibling display"),
     user: Principal = Depends(current_user),
     svc: PostService = Depends(get_post_service),
 ) -> list[PostOut]:
     items = await svc.list(OrgId(UUID(user.org_id)), status=status)
-    return [_to_out(p) for p in items]
+    if run_id is not None:
+        # Post-filter by run_id at the API layer so neither the service
+        # nor the repo contract needs a new parameter. Posts pages are
+        # already paginated client-side, so volume is not a concern here.
+        items = [p for p in items if str(p.run_id) == str(run_id)]
+    plat_by_id = await _batch_platforms_for_posts(OrgId(UUID(user.org_id)), items)
+    return [_to_out(p, plat_by_id.get(p.platform_id)) for p in items]
 
 
 @router.post("/{post_id}/republish")
@@ -131,7 +172,12 @@ async def update_post(
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
     await svc.repo.update(p)
-    return _to_out(p)
+    # Resolve the platform so the response includes target chip data —
+    # the UI re-renders the post card with this response and would
+    # otherwise lose the chip until the next list-refresh.
+    from app.api.deps import _build_repos
+    plat = await _build_repos()["platform"].get(OrgId(UUID(user.org_id)), p.platform_id)
+    return _to_out(p, plat)
 
 
 @router.post("/{post_id}/approve", response_model=PostOut)
@@ -145,7 +191,9 @@ async def approve_post(
     p = await _require_owned(svc, OrgId(UUID(user.org_id)), PostId(post_id))
     p.approve()
     await svc.repo.update(p)
-    return _to_out(p)
+    from app.api.deps import _build_repos
+    plat = await _build_repos()["platform"].get(OrgId(UUID(user.org_id)), p.platform_id)
+    return _to_out(p, plat)
 
 
 @router.post("/{post_id}/publish_now")

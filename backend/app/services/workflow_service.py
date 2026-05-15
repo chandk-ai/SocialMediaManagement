@@ -46,6 +46,67 @@ from app.services.target_resolver import TargetResolver
 log = get_logger(__name__)
 
 
+def _build_drafts_snapshot(
+    posts: list, drafts: list[DraftPost], platforms: list,
+) -> list[dict]:
+    """Construct the JSONB ``drafts_snapshot`` written to a ReviewSession.
+
+    Shape — one entry per **Post** (post-fan-out), not per draft. Each
+    entry carries enough metadata for the UI to render a per-target
+    chip (platform logo + display name + @account_handle) and for the
+    decision endpoint to identify which specific Post the reviewer is
+    excluding.
+
+    Why per-Post instead of per-draft: a single draft can fan out to N
+    Posts (one per connected account of that plugin). The reviewer
+    cares about per-account decisions ("publish to @brand-us but skip
+    @brand-eu"), not per-plugin decisions. Persisting at the Post
+    level matches the user mental model.
+
+    Fields:
+      * ``post_id``          — for cancel-this-target decisions
+      * ``platform_id``      — for excluded_platform_ids matching
+      * ``plugin_name``      — UI uses this to look up the brand logo
+      * ``display_name``     — human-readable account name
+      * ``account_handle``   — @handle / page-id shown next to logo
+      * ``platform_name``    — legacy field (== plugin_name), kept so
+                               older frontend code keeps working
+      * ``text`` / ``hashtags`` / ``media`` — the actual draft content
+    """
+    draft_by_plugin = {d.platform_name: d for d in drafts}
+    platforms_by_id = {p.id: p for p in platforms}
+    snapshot: list[dict] = []
+    for post in posts:
+        target = platforms_by_id.get(post.platform_id)
+        if target is None:
+            continue
+        draft = draft_by_plugin.get(target.plugin_name)
+        if draft is None:
+            # Post exists but no matching draft (shouldn't normally
+            # happen; defensive guard).
+            continue
+        snapshot.append({
+            "post_id": str(post.id),
+            "platform_id": str(target.id),
+            "plugin_name": target.plugin_name,
+            "platform_name": target.plugin_name,          # legacy alias
+            "display_name": getattr(target, "display_name", None) or target.plugin_name,
+            "account_handle": getattr(target, "account_handle", None),
+            "text": draft.text,
+            "hashtags": [h.value for h in draft.hashtags],
+            "media": [
+                {
+                    "url": getattr(m, "url", ""),
+                    "kind": getattr(getattr(m, "kind", None), "value",
+                                    str(getattr(m, "kind", "image"))),
+                    "alt_text": getattr(m, "alt_text", None),
+                }
+                for m in (getattr(draft, "media", None) or [])
+            ],
+        })
+    return snapshot
+
+
 class WorkflowService:
     def __init__(
         self,
@@ -238,8 +299,39 @@ class WorkflowService:
         platforms = resolution.platforms
 
         if review.status is ReviewStatus.APPROVED:
-            run.append(AgentTraceEvent(agent="review", event="approved",
-                                       payload={"recipient": review.recipient}))
+            # Honor per-target exclusions: filter the publish set AND
+            # explicitly mark the skipped sibling Posts as CANCELLED so
+            # the trail makes the reviewer's choice auditable. Without
+            # the explicit cancel, excluded Posts would linger in REVIEW
+            # forever (orphaned) and confuse the Posts dashboard.
+            excluded = set(review.excluded_platform_ids or [])
+            if excluded:
+                # Cancel the sibling Posts whose platform_id is in the
+                # exclusion set BEFORE filtering platforms — we still
+                # need the run_id scoping. Each cancel gets an audit
+                # entry tied to the review so an editor can later see
+                # who skipped which account.
+                for p in await self.post_repo.list(org_id):
+                    if (
+                        p.run_id == run.id
+                        and str(p.platform_id) in excluded
+                        and p.status in {PostStatus.REVIEW, PostStatus.APPROVED, PostStatus.DRAFT}
+                    ):
+                        p.status = PostStatus.FAILED
+                        p.error = "excluded by reviewer at approval"
+                        await self.post_repo.update(p)
+                        run.append(AgentTraceEvent(
+                            agent="review", event="platform_excluded",
+                            payload={"post_id": str(p.id),
+                                     "platform_id": str(p.platform_id)},
+                        ))
+                platforms = [p for p in platforms if str(p.id) not in excluded]
+            run.append(AgentTraceEvent(
+                agent="review", event="approved",
+                payload={"recipient": review.recipient,
+                         "excluded_platform_ids": list(excluded),
+                         "publish_count": len(platforms)},
+            ))
             run.transition(RunStatus.PUBLISHING)
             await self.run_repo.update(run)
             await self._publish_posts_for_run(run.id, org_id, platforms)
@@ -811,6 +903,7 @@ class WorkflowService:
             await self.run_repo.update(run)
             await self._open_review_session(
                 run=run, posts=posts, drafts=drafts,
+                platforms=platforms,
                 channel=review_channel,
                 recipient=review_recipient or "",
                 quorum_required=quorum_required,
@@ -857,19 +950,32 @@ class WorkflowService:
 
     async def _open_review_session(
         self, *, run: WorkflowRun, posts: list[Post], drafts: list[DraftPost],
+        platforms: list,
         channel: str, recipient: str,
         quorum_required: int = 1,
     ) -> ReviewSession | None:
+        """Create a ReviewSession with a fully-enriched ``drafts_snapshot``.
+
+        The snapshot is now **one entry per Post** (post-fan-out) rather
+        than one entry per draft (pre-fan-out). This shape gives the
+        reviewer per-account granularity: each entry carries the
+        ``post_id``, the resolved ``platform_id``, plus the trio the UI
+        needs to render the target chip — ``plugin_name`` (for the
+        logo), ``display_name``, and ``account_handle`` (the @handle
+        shown next to the logo).
+
+        The decision endpoint uses ``post_id`` / ``platform_id`` to
+        cancel specific Posts when the reviewer excludes accounts.
+        Without this enrichment, the UI had nothing but a generic
+        plugin name to display and no way to identify *which*
+        account is being reviewed for plugins with multiple accounts.
+        """
         if self.review_repo is None or not recipient:
             log.info("review_skipped_no_repo_or_recipient",
                      channel=channel, has_repo=bool(self.review_repo))
             return None
         wf_id = run.workflow_id
-        snapshot = [
-            {"platform_name": d.platform_name, "text": d.text,
-             "hashtags": [h.value for h in d.hashtags]}
-            for d in drafts
-        ]
+        snapshot = _build_drafts_snapshot(posts, drafts, platforms)
         review = ReviewSession.create(
             org_id=run.org_id, workflow_id=wf_id, run_id=run.id,
             channel=channel, recipient=recipient, drafts_snapshot=snapshot,
@@ -927,6 +1033,7 @@ class WorkflowService:
         if self.review_repo:
             await self._open_review_session(
                 run=run, posts=posts, drafts=final_state.drafts,
+                platforms=platforms,
                 channel=run.trace and "in_app" or "in_app",
                 # Pull the original session's channel/recipient if available
                 recipient="",

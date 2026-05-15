@@ -6,9 +6,10 @@ import { Input, Textarea } from '@/components/ui/Input';
 import { Sidebar } from '@/components/layout/Sidebar';
 import { TopBar } from '@/components/layout/TopBar';
 import { EmptyState } from '@/components/ui/EmptyState';
+import { PlatformIcon, type PlatformName } from '@/components/ui/PlatformIcon';
 import { useApi, api, ApiError } from '@/lib/api/client';
 import type { Media, Post } from '@/lib/api/types';
-import { FileText, Check, Edit3, Trash2, Send, X, AlertTriangle, Plus, Image as ImageIcon, Upload, Download, Link2 } from 'lucide-react';
+import { FileText, Check, Edit3, Trash2, Send, X, AlertTriangle, Plus, Image as ImageIcon, Upload, Download, Link2, Users } from 'lucide-react';
 import { useRef, useState } from 'react';
 import { getSupabase } from '@/lib/auth/supabase';
 import { mutate } from 'swr';
@@ -21,6 +22,14 @@ export default function PostsPage() {
   const key = filter === 'all' ? '/posts' : `/posts?status=${filter}`;
   const { data } = useApi<Post[]>(key);
   const [editing, setEditing] = useState<Post | null>(null);
+
+  // Count siblings per run_id so each row can show "part of N-platform
+  // batch" — the reviewer/operator sees the full fan-out from a single
+  // workflow run at a glance, even when looking at one post in isolation.
+  const siblingsByRun: Record<string, number> = {};
+  for (const p of data ?? []) {
+    siblingsByRun[p.run_id] = (siblingsByRun[p.run_id] ?? 0) + 1;
+  }
 
   return (
     <div className="flex h-screen">
@@ -54,6 +63,7 @@ export default function PostsPage() {
                   post={p}
                   swrKey={key}
                   onEdit={() => setEditing(p)}
+                  siblingCount={siblingsByRun[p.run_id] ?? 1}
                 />
               ))}
             </div>
@@ -81,10 +91,11 @@ function cleanText(raw: string): string {
   return s.trim();
 }
 
-function PostRow({ post, swrKey, onEdit }: {
+function PostRow({ post, swrKey, onEdit, siblingCount }: {
   post: Post;
   swrKey: string;
   onEdit: () => void;
+  siblingCount: number;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -115,6 +126,31 @@ function PostRow({ post, swrKey, onEdit }: {
         }>{post.status}</Badge>
 
         <div className="min-w-0 flex-1">
+          {/* Target chip — platform logo + display name + @account_handle.
+              Resolved server-side so this is a single render with no
+              extra fetch. ``siblingCount`` shows when this post is one
+              of several from the same workflow run (multi-platform fan-out). */}
+          {(post.platform_plugin_name || siblingCount > 1) && (
+            <div className="mb-2 flex items-center gap-2 flex-wrap">
+              {post.platform_plugin_name && (
+                <span className="inline-flex items-center gap-1.5 rounded-md border border-ink-200 px-2 py-0.5 text-[11px]">
+                  <PlatformIcon name={post.platform_plugin_name as PlatformName} size={12} />
+                  <span className="font-medium">
+                    {post.platform_display_name ?? post.platform_plugin_name}
+                  </span>
+                  {post.account_handle && (
+                    <span className="text-ink-500">· {post.account_handle}</span>
+                  )}
+                </span>
+              )}
+              {siblingCount > 1 && (
+                <span className="inline-flex items-center gap-1 text-[11px] text-ink-500">
+                  <Users size={11} /> part of {siblingCount}-platform batch
+                </span>
+              )}
+            </div>
+          )}
+
           <p className="text-sm text-ink-900 whitespace-pre-line break-words">
             {cleanText(post.text)}
           </p>
