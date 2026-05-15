@@ -258,8 +258,27 @@ function Step2Webhook({
   onDone: () => Promise<void>;
 }) {
   const webhookUrl = useMemo(() => {
-    if (typeof window === 'undefined') return '';
-    return `${window.location.origin}/api/proxy/webhooks/telegram/${trigger.id}`;
+    // The webhook MUST point at the FastAPI backend directly, not at the
+    // Vercel frontend's proxy. Telegram refuses to follow redirects on
+    // webhook URLs, and Next.js ``rewrites()`` to an external destination
+    // returns a 307 — which silently drops every inbound message into
+    // Telegram's pending-update queue. Direct-to-backend bypasses this
+    // and is safe because the trigger adapter verifies the secret_token
+    // signature; no Supabase JWT is needed on the inbound path.
+    //
+    // NEXT_PUBLIC_API_URL is the canonical backend root (e.g.
+    // https://smms-api.onrender.com). Strip any trailing slash so the
+    // resulting URL never has `//api/v1/...`.
+    const backend = (
+      process.env.NEXT_PUBLIC_API_URL || ''
+    ).replace(/\/+$/, '');
+    if (!backend) {
+      // Dev fallback — keep the previous behaviour so localhost still
+      // produces a curl, but flag that this won't work in production.
+      if (typeof window === 'undefined') return '';
+      return `${window.location.origin}/api/proxy/webhooks/telegram/${trigger.id}`;
+    }
+    return `${backend}/api/v1/webhooks/telegram/${trigger.id}`;
   }, [trigger.id]);
 
   const curl = useMemo(() => {

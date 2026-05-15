@@ -115,6 +115,37 @@ prose belongs in module docstrings; this file is a checklist.
   a Page ID as the IG user id — that produces "Object 1074... does
   not exist" downstream.
 
+## Telegram webhook — must point at backend, not at frontend proxy
+
+* **The Telegram `setWebhook` URL MUST be the FastAPI backend directly**
+  (`{NEXT_PUBLIC_API_URL}/api/v1/webhooks/telegram/{trigger_id}`), NOT the
+  Vercel frontend's `/api/proxy/...` path. Telegram refuses to follow
+  redirects on webhook URLs (security policy), and Next.js
+  `rewrites()` in `next.config.mjs` rewrites `/api/proxy/*` to an
+  external destination — which Vercel implements as a **307 Temporary
+  Redirect** to the backend. Inbound updates silently pile up in
+  Telegram's pending queue, never reaching FastAPI.
+
+* **The proxy is a browser-auth helper, not a webhook target.** It
+  exists to attach the Supabase JWT cookie to outbound requests from
+  the React app. Telegram authenticates via the `secret_token` query
+  parameter set on `setWebhook`, verified in
+  `TelegramTriggerAdapter.verify_signature` — no JWT involved. So
+  inbound webhooks have no reason to traverse the frontend.
+
+* **`TelegramSetup.tsx` Step 2 reads `NEXT_PUBLIC_API_URL`** to build
+  the curl. If that env var isn't set on Vercel, the wizard falls
+  back to `window.location.origin` (dev convenience for localhost)
+  but the resulting URL will fail in production. Ensure
+  `NEXT_PUBLIC_API_URL` is set to your backend root on every Vercel
+  environment that ships the wizard.
+
+* **Symptom to recognize.** `getWebhookInfo` shows
+  `"last_error_message": "Wrong response from the webhook: 307
+  Temporary Redirect"` and `"pending_update_count"` > 0. Fix is to
+  re-run `setWebhook` with the backend URL — Telegram auto-flushes
+  the pending queue to the new endpoint within a minute or two.
+
 ## Triggers — edit / pause / delete
 
 * **`PATCH /triggers/{id}` is the single edit surface.** Accepts
