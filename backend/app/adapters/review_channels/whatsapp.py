@@ -59,7 +59,14 @@ class WhatsAppReviewChannel(ReviewChannel):
             log.warning("whatsapp_send_failed", error=str(exc))
             return f"failed:{recipient}"
 
-    async def acknowledge(self, recipient: str, text: str) -> None:
+    async def acknowledge(
+        self, recipient: str, text: str, *, request_reply: bool = False,
+    ) -> None:
+        # WhatsApp has no equivalent of Telegram's force_reply UI, so
+        # we just send a plain message — the user replies via the chat
+        # input naturally. ``request_reply`` is accepted for interface
+        # uniformity but ignored.
+        _ = request_reply
         token = os.getenv(self.config.get("access_token_env", "WHATSAPP_ACCESS_TOKEN"), "")
         phone_id = self.config.get("phone_number_id", "")
         version = self.config.get("graph_version", "v19.0")

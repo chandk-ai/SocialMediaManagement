@@ -43,6 +43,14 @@ class TriggerEvent:
     # are the same.
     actor_id: str | None = None
     actor_handle: str | None = None    # optional human-readable label (@username)
+    # True when this event came from a chat inline-keyboard button tap
+    # (Telegram callback_query) rather than a typed text message. The
+    # webhook router uses this to distinguish "user tapped Revise"
+    # (which carries no useful feedback text on its own) from "user
+    # typed a revision". The Revise button alone triggers a follow-up
+    # prompt asking "what should change?" instead of immediately
+    # firing the agent re-run with no signal.
+    is_button_tap: bool = False
 
 
 class TriggerAdapter(ABC):

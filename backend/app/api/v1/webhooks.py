@@ -127,6 +127,38 @@ async def _handle_messaging_webhook(
 
     started: list[UUID] = []
     for ev in events:
+        # ── Revise-button special case ───────────────────────────────
+        # The Revise inline-keyboard button on its own carries zero
+        # useful feedback ("Revise" is just the button label, not a
+        # critique). Re-running the agents on that produces the same
+        # output. So when the user taps Revise, we INTERCEPT BEFORE
+        # applying the decision:
+        #   1. find the pending review for this sender
+        #   2. send a follow-up prompt ("what should change?") using
+        #      the channel's force_reply UI when available (Telegram)
+        #   3. skip apply + resume_after_review entirely — the session
+        #      stays PENDING so the user's next typed reply correlates
+        #      back via latest_pending_for and applies as the real
+        #      revision feedback
+        # Non-Revise button taps (Approve, Reject) go through the
+        # normal apply_reply path because they're complete decisions.
+        if ev.is_button_tap and (ev.directive or "").strip().lower() == "revise":
+            pending = await review_svc.repo.latest_pending_for(channel, ev.sender)
+            if pending is not None:
+                await review_svc.acknowledge(
+                    pending,
+                    "✏️ *What should change?* Reply to this message with your "
+                    "feedback — be specific (tone, length, hashtags, URL, etc.) "
+                    "and the bot will regenerate the draft accordingly.",
+                    request_reply=True,
+                )
+                log.info("revise_awaiting_user_feedback",
+                         channel=channel, sender=ev.sender,
+                         review_id=str(pending.id))
+                continue
+            # No pending review to attach the prompt to → fall through
+            # to normal handling (which will likely no-op too).
+
         # If this message is a reply to a pending review, route it as a decision.
         # actor_id distinguishes individual voters when the channel is a group
         # (Telegram quorum mode). For 1:1 channels it's None and the review

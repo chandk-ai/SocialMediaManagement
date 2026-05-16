@@ -49,6 +49,64 @@ from app.services.target_resolver import TargetResolver
 log = get_logger(__name__)
 
 
+def _source_item_to_dict(it) -> dict:
+    """Serialize a SourceItem to a JSON-safe dict for ``run.metadata``
+    persistence. Used to preserve ad-hoc inline items across revise
+    rounds. The shape mirrors what the in-memory SourceItem carries,
+    with MediaAsset tuples flattened to {url, kind, alt_text} dicts.
+    """
+    return {
+        "external_id": it.external_id,
+        "title": it.title,
+        "body": it.body,
+        "url": getattr(it, "url", None),
+        "published_at": (
+            it.published_at.isoformat() if getattr(it, "published_at", None) else None
+        ),
+        "media": [
+            {
+                "url": m.url,
+                "kind": getattr(m.kind, "value", str(m.kind)) if m.kind else "image",
+                "alt_text": getattr(m, "alt_text", None),
+            }
+            for m in (it.media or ())
+        ],
+        "metadata": dict(it.metadata or {}),
+    }
+
+
+def _source_item_from_dict(d: dict):
+    """Inverse of ``_source_item_to_dict``. Reconstitutes a SourceItem
+    that ``_rerun_with_feedback`` can feed back into the agent loop on
+    a revise round, so the user's original brief + image survive."""
+    from app.domain.entities.source import SourceItem
+    from app.domain.value_objects.content import MediaAsset, MediaKind
+    media = tuple(
+        MediaAsset(
+            url=m.get("url", ""),
+            kind=MediaKind(m.get("kind") or "image"),
+            alt_text=m.get("alt_text"),
+        )
+        for m in (d.get("media") or [])
+        if m.get("url")
+    )
+    published = None
+    if d.get("published_at"):
+        try:
+            published = datetime.fromisoformat(d["published_at"])
+        except Exception:                                       # noqa: BLE001
+            pass
+    return SourceItem(
+        external_id=d.get("external_id", ""),
+        title=d.get("title", ""),
+        body=d.get("body", ""),
+        url=d.get("url"),
+        published_at=published,
+        media=media,
+        metadata=dict(d.get("metadata") or {}),
+    )
+
+
 def _build_drafts_snapshot(
     posts: list, drafts: list[DraftPost], platforms: list,
 ) -> list[dict]:
@@ -630,6 +688,20 @@ class WorkflowService:
             # Traced so observability shows which path the run took.
             if inline_source_items:
                 items = list(inline_source_items)
+                # Persist the synthesized items on run.metadata so a
+                # subsequent revise round (``_rerun_with_feedback``)
+                # can RESTORE them instead of refetching from
+                # configured sources. Without this, tapping Revise on
+                # an ad-hoc post loses both the original brief AND
+                # the original image — the rerun would either hit
+                # Notion (wrong content) or have empty media (forcing
+                # AI mock generation). With this, the user's original
+                # text + flyer survive across revisions; if they
+                # attach a NEW image to the revise reply, it replaces
+                # via the existing feedback_media override path.
+                run.metadata["ad_hoc_inline_items"] = [
+                    _source_item_to_dict(it) for it in items
+                ]
                 run.append(AgentTraceEvent(
                     agent="orchestrator", event="ad_hoc_inline_items",
                     payload={
@@ -1368,10 +1440,26 @@ class WorkflowService:
         """
         # Reuse the directive that started this run, plus the feedback.
         directive = (run.directive + "\nReviewer feedback: " + feedback).strip()
-        items = await load_items(
-            [await self.source_repo.get(run.org_id, sid) for sid in wf.source_ids if sid],
-            self.registry,
-        )
+        # Ad-hoc preservation: if the original run was Telegram ad-hoc
+        # (or any other inline-items entrypoint), restore the same
+        # SourceItem(s) instead of fetching from configured sources.
+        # This keeps the original text brief + attached image intact
+        # across Revise rounds. The reviewer's new image (if any)
+        # replaces via ``feedback_media`` later; otherwise the
+        # original image stays attached. The reviewer's TYPED text
+        # is layered into the directive above.
+        persisted = run.metadata.get("ad_hoc_inline_items") if run.metadata else None
+        if persisted:
+            items = [_source_item_from_dict(d) for d in persisted if d.get("external_id")]
+            run.append(AgentTraceEvent(
+                agent="orchestrator", event="ad_hoc_inline_items_restored",
+                payload={"count": len(items)},
+            ))
+        else:
+            items = await load_items(
+                [await self.source_repo.get(run.org_id, sid) for sid in wf.source_ids if sid],
+                self.registry,
+            )
         api_key = await self._resolve_llm_api_key(run.org_id, wf.config.llm_provider)
         orchestrator = build_orchestrator(
             wf, self.registry, api_key=api_key,

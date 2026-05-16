@@ -154,6 +154,7 @@ class TelegramTrigger(TriggerAdapter):
             in_reply_to=str(original_msg_id) if original_msg_id is not None else None,
             actor_id=actor_id,
             actor_handle=actor_handle,
+            is_button_tap=True,
         )
 
     @staticmethod

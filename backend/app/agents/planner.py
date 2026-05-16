@@ -69,6 +69,12 @@ Produce a JSON object with this shape:
 Tailor each blueprint to the platform: LinkedIn = professional & long, Twitter = punchy & short,
 Instagram = visual & lifestyle, Facebook = community & conversational, YouTube = video pitch + description.
 Respect the requested tone and audience.
+
+URL preservation: If the user's directive or any source material mentions a
+URL (http:// or https://), include that EXACT URL as one of the entries in
+``key_messages`` for every blueprint — verbatim, no shortening, no
+paraphrasing. The Executor is required to surface it in the final post. The
+user explicitly wants readers to click it; dropping it is a hard failure.
 """
 
 

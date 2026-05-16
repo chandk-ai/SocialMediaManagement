@@ -151,16 +151,36 @@ class TelegramReviewChannel(ReviewChannel):
                     return m
         return None
 
-    async def acknowledge(self, recipient: str, text: str) -> None:
+    async def acknowledge(
+        self, recipient: str, text: str, *, request_reply: bool = False,
+    ) -> None:
+        """Send a follow-up message to the chat.
+
+        ``request_reply=True`` adds Telegram's ``force_reply`` flag so
+        the user's text input is auto-focused on this message — used
+        when the bot asks "what should change?" after the Revise
+        button is tapped. The user's reply will carry
+        ``reply_to_message`` pointing at this prompt, which the
+        webhook router correlates back to the pending review session.
+        """
         token = self._resolve_token()
         if not token:
             log.info("telegram_ack_dry_run", recipient=recipient, text=text)
             return
+        body: dict[str, Any] = {
+            "chat_id": recipient, "text": text, "parse_mode": "Markdown",
+        }
+        if request_reply:
+            body["reply_markup"] = {
+                "force_reply": True,
+                "selective": False,
+                "input_field_placeholder": "What should change?",
+            }
         try:
             async with httpx.AsyncClient(timeout=8.0) as client:
                 await client.post(
                     f"https://api.telegram.org/bot{token}/sendMessage",
-                    json={"chat_id": recipient, "text": text, "parse_mode": "Markdown"},
+                    json=body,
                 )
         except httpx.HTTPError as exc:
             log.warning("telegram_ack_failed", error=str(exc))

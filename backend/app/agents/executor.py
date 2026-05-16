@@ -33,6 +33,11 @@ Rules:
 - Open with the supplied hook.
 - End with the CTA if present.
 - Place hashtags after the body, separated from it by a blank line.
+- **If the brief or directive mentions a URL, include the FULL URL verbatim
+  in the post body (do NOT paraphrase, shorten, or drop it). The user
+  explicitly wants readers to click that link — preserving it is mandatory,
+  not optional. Place URLs naturally in the body or in a "Register here:"
+  / "Learn more:" line, but never silently omit them.**
 - Output ONLY the post text — no preamble, no explanation."""
 
 

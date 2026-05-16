@@ -215,10 +215,21 @@ class ReviewService:
         # else: still pending — wait for more taps.
         await self.repo.update(review)
 
-    async def acknowledge(self, review: ReviewSession, message: str) -> None:
+    async def acknowledge(
+        self, review: ReviewSession, message: str,
+        *, request_reply: bool = False,
+    ) -> None:
+        """Send an out-of-band follow-up on the review's channel.
+
+        ``request_reply=True`` asks the channel adapter to render the
+        message with an interactive reply UI (Telegram's
+        ``force_reply``). Used when the Revise button is tapped — the
+        bot needs the user's typed feedback before the agent re-run
+        is useful.
+        """
         try:
             adapter = self.channel_adapter(review.channel)
-            await adapter.acknowledge(review.recipient, message)
+            await adapter.acknowledge(review.recipient, message, request_reply=request_reply)
         except Exception as exc:                            # noqa: BLE001
             log.warning("review_ack_failed", error=str(exc))
 

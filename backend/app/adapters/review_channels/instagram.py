@@ -53,7 +53,11 @@ class InstagramReviewChannel(ReviewChannel):
             log.warning("instagram_send_failed", error=str(exc))
             return f"failed:{recipient}"
 
-    async def acknowledge(self, recipient: str, text: str) -> None:
+    async def acknowledge(
+        self, recipient: str, text: str, *, request_reply: bool = False,
+    ) -> None:
+        # IG DM doesn't have force_reply equivalent; ignore the hint.
+        _ = request_reply
         token = os.getenv(self.config.get("access_token_env", "INSTAGRAM_ACCESS_TOKEN"), "")
         version = self.config.get("graph_version", "v19.0")
         if not token:

@@ -58,8 +58,18 @@ class ReviewChannel(ABC):
         correlate the reviewer's eventual reply back to the ReviewSession.
         """
 
-    async def acknowledge(self, recipient: str, text: str) -> None:
-        """Optional follow-up message ("Posted!", "Got it, revising...")."""
+    async def acknowledge(
+        self, recipient: str, text: str, *, request_reply: bool = False,
+    ) -> None:
+        """Optional follow-up message ("Posted!", "Got it, revising...").
+
+        ``request_reply`` is a hint that the bot is asking the user for
+        free-text input (e.g. "what should change?"). Channels that
+        support an interactive reply UI (Telegram's ``force_reply``)
+        should honor it; channels that don't (email, in_app) treat
+        the message as a plain notification and the user replies
+        through whatever interface they normally use.
+        """
 
 
 # ── decision parsing ───────────────────────────────────────────────────────
