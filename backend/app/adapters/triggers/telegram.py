@@ -17,7 +17,10 @@ Inbound shapes we handle:
 from __future__ import annotations
 
 import hmac
+import os
 from typing import Any
+
+import httpx
 
 from app.core.logging import get_logger
 from app.plugins.registry import register_plugin
@@ -59,6 +62,21 @@ class TelegramTrigger(TriggerAdapter):
             or headers.get("x-telegram-bot-api-secret-token", "")
         )
         return hmac.compare_digest(secret, sent)
+
+    def _resolve_token(self) -> str:
+        """Get the bot token for THIS trigger. Mirrors the same
+        resolution logic the review-channel side uses so a single
+        bot config — inline ``bot_token`` per trigger or a fallback
+        env var for single-bot self-hosted deployments — works for
+        BOTH the inbound webhook (this adapter) AND the outbound
+        review messages (the review channel adapter).
+        """
+        inline = (self.config.get("bot_token") or "").strip()
+        if inline:
+            return inline
+        return os.getenv(
+            self.config.get("bot_token_env", "TELEGRAM_BOT_TOKEN"), "",
+        )
 
     # ── parsing ──────────────────────────────────────────────────────
     async def parse(self, payload: dict[str, Any]) -> list[TriggerEvent]:
