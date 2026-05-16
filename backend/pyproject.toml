@@ -36,6 +36,11 @@ dependencies = [
   # yt-dlp powers /media/import (YouTube / TikTok / Vimeo → mp4).
   # ffmpeg must also be present in the container PATH — see Dockerfile.
   "yt-dlp>=2024.07.01",
+  # Pillow — image transformations (aspect-ratio padding for IG / FB
+  # / X / Pinterest, future thumbnail generation). Used by
+  # MediaNormalizer in the publish path to fit a draft's image to
+  # each platform's allowed aspect ratio before upload.
+  "Pillow>=10.0",
 ]
 
 [project.optional-dependencies]

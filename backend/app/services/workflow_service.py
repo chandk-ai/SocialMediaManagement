@@ -1448,7 +1448,16 @@ class WorkflowService:
         await governor.acquire(target.plugin_name,
                                account_id=str(target.id))
         entry = self.registry.get(PluginKind.PLATFORM, target.plugin_name)
-        adapter: SocialPlatform = entry.cls(credentials=target.credentials, config=target.config)
+        # Inject __org_id__ into the platform adapter config so anything
+        # the adapter needs to write tenant-scoped (Supabase Storage,
+        # for example — MediaNormalizer re-hosts padded images here)
+        # lands in the right org's path instead of the literal "shared"
+        # prefix. Same convention used by triggers and source plugins.
+        plat_config = dict(target.config or {})
+        plat_config["__org_id__"] = str(target.org_id)
+        adapter: SocialPlatform = entry.cls(
+            credentials=target.credentials, config=plat_config,
+        )
         # Guard: refuse silent fakes. Adapters with `experimental=True` can be
         # listed in the UI but cannot publish until a real implementation exists.
         if getattr(adapter.capabilities, "experimental", False):

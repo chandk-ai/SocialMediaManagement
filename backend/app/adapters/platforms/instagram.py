@@ -104,6 +104,25 @@ class InstagramPlatform(SocialPlatform):
         caption = _compose(payload)
         media = payload.media[0]
 
+        # Normalize the image to fit Instagram's aspect-ratio range
+        # (4:5 portrait to 1.91:1 landscape). Without this, posts with
+        # tall flyers / unusual ratios get rejected at container-create
+        # with error_subcode 2207009 "Invalid Aspect Ratio". The
+        # normalizer pads with a neutral background (preserves all
+        # content) and re-hosts in Supabase — so the URL we send IG
+        # is always inside the allowed range. Videos skip normalization
+        # in this round (Reels need ffmpeg-side work, not Pillow).
+        image_url = media.url
+        if not _is_video_asset(media):
+            from app.services.media_normalizer import MediaNormalizer
+            normalizer = MediaNormalizer()
+            org_id = str(self.config.get("__org_id__") or "shared")
+            image_url = await normalizer.normalize_image_for_platform(
+                image_url=media.url,
+                platform_plugin_name="instagram",
+                org_id=org_id,
+            )
+
         async with httpx.AsyncClient(timeout=60.0) as client:
             # Step 1 — create the media container.
             create_data: dict[str, Any] = {
@@ -116,7 +135,7 @@ class InstagramPlatform(SocialPlatform):
                 create_data["media_type"] = "REELS"
                 create_data["video_url"] = media.url
             else:
-                create_data["image_url"] = media.url
+                create_data["image_url"] = image_url
 
             r = await client.post(f"{GRAPH_API}/{ig}/media", data=create_data)
             if r.status_code >= 400:
