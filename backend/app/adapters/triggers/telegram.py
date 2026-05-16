@@ -181,13 +181,17 @@ class TelegramTrigger(TriggerAdapter):
         if not token:
             log.info("telegram_media_dry_run_no_token", count=len(file_specs))
             return []
+        urls: list[str] = []
+        # OUTER try/except wraps EVERYTHING — including the
+        # MediaImportService() / SupabaseStorage() construction. If any
+        # of that throws (env var missing, Supabase client init bug,
+        # whatever) we degrade gracefully to "no media this round"
+        # instead of 500-ing the entire webhook. The directive still
+        # flows through and the agents will use AI-generated media or
+        # text-only output.
         try:
             from app.services.media_import import MediaImportService
-        except ImportError:                                       # pragma: no cover
-            return []
-        importer = MediaImportService()
-        urls: list[str] = []
-        try:
+            importer = MediaImportService()
             async with httpx.AsyncClient(timeout=30.0) as client:
                 for kind, file_id in file_specs:
                     try:
@@ -226,7 +230,10 @@ class TelegramTrigger(TriggerAdapter):
                             error=str(exc)[:200],
                         )
         except Exception as exc:                                   # noqa: BLE001
-            log.warning("telegram_media_pipeline_failed", error=str(exc))
+            # Constructor failures (SupabaseStorage init, importer
+            # plugin missing, etc.) land here. Logged + we return an
+            # empty list so the rest of the parse path still works.
+            log.warning("telegram_media_pipeline_init_failed", error=str(exc))
         if urls:
             log.info("telegram_media_ingested",
                      count=len(urls), of=len(file_specs))

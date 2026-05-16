@@ -504,10 +504,24 @@ class WorkflowService:
                and t.is_active
                and t.review_channel
         ]
-        matching.sort(
-            key=lambda t: getattr(t, "created_at", None) or datetime.min,
-            reverse=True,
-        )
+        # Sort newest-first. Use a sort key that returns 0 / negative-infinity-ish
+        # for missing values to avoid mixing tz-aware and naive datetimes
+        # (Python raises TypeError if you try to compare them). The DB
+        # column is ``timestamp with time zone`` so every persisted row
+        # is tz-aware; only an in-memory test fixture would be naive.
+        from datetime import timezone
+        EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+        def _sort_key(t):
+            dt = getattr(t, "created_at", None)
+            if dt is None:
+                return EPOCH
+            # If somehow naive, assume UTC to keep the comparison sound.
+            if dt.tzinfo is None:
+                return dt.replace(tzinfo=timezone.utc)
+            return dt
+
+        matching.sort(key=_sort_key, reverse=True)
         if not matching:
             return fallback_channel, fallback_recipient
         chosen = matching[0]
