@@ -127,6 +127,22 @@ async def _handle_messaging_webhook(
 
     started: list[UUID] = []
     for ev in events:
+        # Diagnostic: surface every inbound event's shape so when the
+        # Revise / Approve / Reject paths misbehave we can see in
+        # Render logs exactly what arrived (button vs typed, what the
+        # directive looks like, sender, etc.). Cheap, always on —
+        # this is the main triage signal for chat-trigger issues.
+        log.info(
+            "trigger_event_received",
+            channel=channel,
+            is_button_tap=ev.is_button_tap,
+            directive_preview=(ev.directive or "")[:80],
+            directive_len=len(ev.directive or ""),
+            sender=ev.sender,
+            in_reply_to=ev.in_reply_to,
+            media_count=len(ev.media_urls or []),
+            actor_handle=ev.actor_handle,
+        )
         # ── Revise-button special case ───────────────────────────────
         # The Revise inline-keyboard button on its own carries zero
         # useful feedback ("Revise" is just the button label, not a
@@ -143,21 +159,31 @@ async def _handle_messaging_webhook(
         # Non-Revise button taps (Approve, Reject) go through the
         # normal apply_reply path because they're complete decisions.
         if ev.is_button_tap and (ev.directive or "").strip().lower() == "revise":
+            log.info("revise_button_intercept_entered",
+                     channel=channel, sender=ev.sender)
             pending = await review_svc.repo.latest_pending_for(channel, ev.sender)
             if pending is not None:
+                log.info("revise_button_pending_found",
+                         channel=channel, sender=ev.sender,
+                         review_id=str(pending.id),
+                         pending_status=pending.status.value if hasattr(pending.status, "value") else str(pending.status))
                 await review_svc.acknowledge(
                     pending,
                     "✏️ *What should change?* Reply to this message with your "
                     "feedback — be specific (tone, length, hashtags, URL, etc.) "
-                    "and the bot will regenerate the draft accordingly.",
+                    "and the bot will regenerate the draft accordingly. "
+                    "Your previously attached image stays unless you upload a new one.",
                     request_reply=True,
                 )
                 log.info("revise_awaiting_user_feedback",
                          channel=channel, sender=ev.sender,
                          review_id=str(pending.id))
                 continue
-            # No pending review to attach the prompt to → fall through
-            # to normal handling (which will likely no-op too).
+            # No pending review — falls through. Log so we know why.
+            log.info("revise_button_no_pending_review",
+                     channel=channel, sender=ev.sender,
+                     hint="user may be tapping Revise on a stale draft whose session already terminated")
+            # Fall through to normal handling (which will likely no-op too).
 
         # If this message is a reply to a pending review, route it as a decision.
         # actor_id distinguishes individual voters when the channel is a group

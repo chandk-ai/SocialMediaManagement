@@ -3,12 +3,98 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from dataclasses import asdict
 
 from app.adapters.llm.base import LLMRequest
 from app.domain.value_objects.content import DraftPost, Hashtag
 
 from .base import Agent, AgentState
+
+
+# Matches http(s):// URLs the user might have typed into the directive
+# or that appear in source-item bodies. Conservative — stops at common
+# trailing punctuation so we don't include the period at the end of a
+# sentence. Doesn't try to validate the URL beyond shape.
+_URL_RE = re.compile(r"https?://[^\s<>\"')]+[^\s<>\"')\.,;:!?]")
+
+
+def _extract_urls(text: str) -> list[str]:
+    """All http(s) URLs in ``text``, in order, deduplicated."""
+    seen: list[str] = []
+    for m in _URL_RE.finditer(text or ""):
+        u = m.group(0)
+        if u not in seen:
+            seen.append(u)
+    return seen
+
+
+def _ensure_urls_present(text: str, state: AgentState, bp) -> str:
+    """Guarantee that any URL the user mentioned in the directive (or
+    that came from a source item — e.g. the user's Notion page included
+    a registration link) appears in the final post text.
+
+    The Executor's system prompt asks the LLM to preserve URLs, but
+    LLMs ignore that ~10% of the time when generating short-form
+    social copy where URLs feel unnatural. This post-processing step
+    is the safety net: extract URLs from the directive + key_messages
+    + source bodies, check which are missing from the LLM output,
+    and append them on a clean "Register / Learn more:" line.
+
+    Idempotent — if all URLs are already present, returns ``text``
+    unchanged.
+    """
+    # Sources to scan for URLs the user "meant" to surface:
+    #   * the directive (highest signal — user typed this just now)
+    #   * the blueprint's key_messages (planner extracted these)
+    #   * each selected source item's body (Notion page text etc.)
+    candidates: list[str] = []
+    candidates += _extract_urls(state.directive or "")
+    for km in (getattr(bp, "key_messages", None) or []):
+        candidates += _extract_urls(str(km))
+    for it in (state.source_items or []):
+        candidates += _extract_urls(getattr(it, "body", "") or "")
+
+    if not candidates:
+        return text
+
+    # Dedupe preserving order; keep only URLs the LLM dropped.
+    seen: set[str] = set()
+    missing: list[str] = []
+    for u in candidates:
+        if u in seen:
+            continue
+        seen.add(u)
+        if u not in text:
+            missing.append(u)
+
+    if not missing:
+        return text
+
+    # Insert before any hashtag block so the URL sits with the body,
+    # not after the tags. Hashtags are typically the LAST chunk
+    # separated from the body by a blank line — Executor's own
+    # convention.
+    suffix_label = "Register here:" if len(missing) == 1 else "Links:"
+    appendage = "\n\n" + suffix_label + "\n" + "\n".join(missing)
+
+    # Find the hashtag block (line starting with "#" near the end).
+    lines = text.split("\n")
+    tag_start = len(lines)
+    for i in range(len(lines) - 1, -1, -1):
+        stripped = lines[i].strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#"):
+            tag_start = i
+        else:
+            break
+
+    if tag_start < len(lines):
+        body = "\n".join(lines[:tag_start]).rstrip()
+        tags = "\n".join(lines[tag_start:]).lstrip("\n")
+        return f"{body}{appendage}\n\n{tags}".strip()
+    return (text.rstrip() + appendage).strip()
 
 
 # Concurrency cap on parallel per-blueprint LLM calls. The Executor
@@ -113,6 +199,16 @@ class ExecutorAgent(Agent):
                     image_urls=image_urls,
                 ))
             text = rsp.text.strip()
+            # Belt-and-suspenders URL preservation: the system prompt
+            # asks the LLM to include any URLs from the directive
+            # verbatim, but LLMs ignore that ~10% of the time
+            # (especially for Instagram-style copy where URLs feel
+            # unnatural). Post-process to GUARANTEE: if the user's
+            # directive or source items mention a URL and it's NOT
+            # in the LLM output, append it. Belt-and-suspenders so
+            # the user's explicit "include this link" intent is
+            # never silently dropped.
+            text = _ensure_urls_present(text, state, bp)
             media = await _maybe_generate_media(bp, state)
             return DraftPost(
                 platform_name=bp.platform_name,
