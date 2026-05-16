@@ -22,7 +22,7 @@ from app.core.logging import get_logger
 from app.domain.entities.review_session import ReviewSession, ReviewStatus
 from app.domain.value_objects.ids import OrgId, ReviewId
 from app.plugins.registry import PluginKind, PluginRegistry
-from app.repositories.ports import ReviewSessionRepository
+from app.repositories.ports import ReviewSessionRepository, TriggerRepository
 
 log = get_logger(__name__)
 
@@ -40,13 +40,68 @@ def _guess_kind(url: str) -> str:
 
 
 class ReviewService:
-    def __init__(self, repo: ReviewSessionRepository, registry: PluginRegistry) -> None:
+    def __init__(
+        self,
+        repo: ReviewSessionRepository,
+        registry: PluginRegistry,
+        *,
+        trigger_repo: TriggerRepository | None = None,
+    ) -> None:
         self.repo = repo
         self.registry = registry
+        # Optional — when supplied, ``acknowledge`` can look up the
+        # active trigger that owns the bot_token (etc.) for this
+        # review's channel. Without it, channel adapters only see
+        # env-var config which is wrong for multi-tenant / multi-bot
+        # deployments (the per-trigger token never gets injected and
+        # the Telegram call short-circuits as a dry-run). See the
+        # mirror lookup in WorkflowService._dispatch_review_message
+        # for the canonical pattern.
+        self.trigger_repo = trigger_repo
 
     def channel_adapter(self, name: str, config: dict | None = None) -> ReviewChannel:
         entry = self.registry.get(PluginKind.REVIEW_CHANNEL, name)
         return entry.cls(config=config or {})
+
+    async def _channel_config_for_review(self, review: ReviewSession) -> dict:
+        """Find the active Trigger whose review_channel matches the
+        review's channel and return its config (which carries the
+        bot_token / phone_number_id / etc.). Empty dict on miss —
+        adapters can still fall back to env-var config.
+
+        Mirrors the lookup used by ``WorkflowService._dispatch_review_message``
+        so outbound dispatch and inbound acknowledgements share the
+        exact same credentials source. Without this, an acknowledge
+        call (Revise "What should change?" prompt) silently dry-runs
+        because the adapter sees an empty token."""
+        if self.trigger_repo is None:
+            return {}
+        try:
+            triggers = await self.trigger_repo.list(review.org_id)
+            candidate = next(
+                (t for t in triggers
+                 if t.workflow_id == review.workflow_id
+                 and t.is_active
+                 and t.review_channel == review.channel),
+                None,
+            )
+            if candidate is None:
+                # Fallback — any active trigger on this workflow that
+                # uses the same channel. Covers edge cases where the
+                # review_channel field on the trigger was set after
+                # the review was created.
+                candidate = next(
+                    (t for t in triggers
+                     if t.workflow_id == review.workflow_id
+                     and t.is_active
+                     and (t.config or {}).get("bot_token")),
+                    None,
+                )
+            return dict(candidate.config or {}) if candidate is not None else {}
+        except Exception as exc:                                # noqa: BLE001
+            log.info("review_ack_trigger_lookup_failed",
+                     review_id=str(review.id), error=str(exc))
+            return {}
 
     # ── outbound: send drafts for review ─────────────────────────────
     async def request_review(
@@ -226,12 +281,37 @@ class ReviewService:
         ``force_reply``). Used when the Revise button is tapped — the
         bot needs the user's typed feedback before the agent re-run
         is useful.
+
+        The trigger row that owns this review's channel carries the
+        bot_token / phone_number_id / access_token; we look it up and
+        pass it to the channel adapter. Without this step the adapter
+        sees an empty config, can't read a token from env vars in a
+        multi-tenant deploy, and falls through to its ``dry_run``
+        path — meaning the user never receives the prompt. (Render
+        logs: ``telegram_ack_dry_run`` events appearing exactly when
+        the user taps Revise.)
         """
         try:
-            adapter = self.channel_adapter(review.channel)
-            await adapter.acknowledge(review.recipient, message, request_reply=request_reply)
+            channel_config = await self._channel_config_for_review(review)
+            adapter = self.channel_adapter(review.channel, channel_config)
+            await adapter.acknowledge(
+                review.recipient, message, request_reply=request_reply,
+            )
+            log.info(
+                "review_ack_sent",
+                review_id=str(review.id),
+                channel=review.channel,
+                recipient=review.recipient,
+                request_reply=request_reply,
+                config_has_token=bool(
+                    channel_config.get("bot_token")
+                    or channel_config.get("access_token")
+                    or channel_config.get("phone_number_id")
+                ),
+            )
         except Exception as exc:                            # noqa: BLE001
-            log.warning("review_ack_failed", error=str(exc))
+            log.warning("review_ack_failed",
+                        review_id=str(review.id), error=str(exc))
 
     async def list_open(self, org_id: OrgId) -> list[ReviewSession]:
         return await self.repo.list_open(org_id)

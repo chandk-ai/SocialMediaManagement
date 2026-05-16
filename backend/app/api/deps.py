@@ -216,7 +216,19 @@ def get_trigger_service() -> TriggerService:
 
 
 def get_review_service() -> ReviewService:
-    return ReviewService(_build_repos()["review"], get_registry())
+    repos = _build_repos()
+    # Pass trigger_repo so ReviewService.acknowledge can look up the
+    # active trigger that owns this review's channel and inject its
+    # config (bot_token / phone_number_id / access_token) into the
+    # channel adapter. Without it, acknowledge calls fall through to
+    # the adapter's dry-run path in multi-tenant deploys — the user
+    # never sees the "What should change?" prompt after tapping
+    # Revise. Symmetric with the lookup already wired into
+    # WorkflowService._dispatch_review_message.
+    return ReviewService(
+        repos["review"], get_registry(),
+        trigger_repo=repos["trigger"],
+    )
 
 
 def get_workflow_service() -> WorkflowService:
